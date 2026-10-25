@@ -1,0 +1,19 @@
+diff --git a/src/dynarmic/backend/arm64/emit_arm64.cpp b/src/dynarmic/backend/arm64/emit_arm64.cpp
+index 1ecb542..ff60bc1 100644
+--- a/src/dynarmic/backend/arm64/emit_arm64.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64.cpp
+@@ -39,7 +39,13 @@ template<>
+ void EmitIR<IR::Opcode::CallHostFunction>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+ 
+-    ctx.reg_alloc.PrepareForCall(args[1], args[2], args[3]);
++    // Unused argument slots are Void: pass only the arguments that are present.
++    const auto arg = [&](int i) -> std::optional<Argument::copyable_reference> {
++        if (args[i].IsVoid())
++            return std::nullopt;
++        return std::ref(args[i]);
++    };
++    ctx.reg_alloc.PrepareForCall(arg(1), arg(2), arg(3));
+     code.MOV(Xscratch0, args[0].GetImmediateU64());
+     code.BLR(Xscratch0);
+ }

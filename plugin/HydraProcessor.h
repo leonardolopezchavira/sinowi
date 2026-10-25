@@ -16,7 +16,9 @@
 // CCs (sent when the host or the editor changes them), and the 44.1 kHz output
 // is resampled to the host rate. The plugin state holds the parameters and the
 // instrument's flash (settings, banks); the firmware file is a global setting.
-class HydraProcessor : public juce::AudioProcessor, private juce::AudioProcessorParameter::Listener {
+class HydraProcessor : public juce::AudioProcessor,
+                       private juce::AudioProcessorParameter::Listener,
+                       private juce::Timer {
 public:
     HydraProcessor();
     ~HydraProcessor() override;
@@ -57,6 +59,9 @@ public:
     // Whether the editor shows the patch browser (a global setting).
     bool browserVisible() const;
     void setBrowserVisible(bool visible);
+    // The panel screens' colour preset (a global setting).
+    int screenTint() const;
+    void setScreenTint(int tint);
     juce::AudioParameterFloat& outputGain() { return *outputGain_; }
     // Sends the patches of a .hydra bank (or a single .patch) to a bank (0 = A
     // ... 4 = E) of the instrument over its MIDI input. Returns an error message,
@@ -69,10 +74,31 @@ public:
     // The emulated front panel (no-ops while no emulator runs).
     void panelInput(const hydra::Emulator::PanelInput& input);
     bool readPanel(hydra::FrontPanel::Lights& out, std::uint64_t& generation) const;
+    // The last value of each MIDI CC sent to the instrument (from the MIDI input
+    // or the host parameters, after scaleController; -1 = none yet). Returns false if nothing changed
+    // since `serial`, which it updates.
+    bool readControllers(std::array<int, 128>& out, std::uint32_t& serial) const;
 
 private:
     void parameterValueChanged(int index, float newValue) override;
     void parameterGestureChanged(int, bool) override {}
+
+    // A fresh instrument (no stored flash) has empty banks and stays silent: it
+    // gets the first .hydra bank from the firmware folder into bank A, then A001.
+    void timerCallback() override;
+    juce::File defaultBankFile() const;
+    enum class AutoBank { Off, WaitForBoot, Uploading, Settle };
+    AutoBank autoBank_ = AutoBank::Off;
+    juce::uint32 settleUntil_ = 0;
+    // The instrument's flash right after that first upload, kept next to the
+    // firmware (default-bank.flash), so later fresh instruments start with the
+    // bank already in place instead of uploading it again (over a minute). It is
+    // tied to the bank and firmware files (path, size, date) and remade if they change.
+    juce::File defaultFlashFile() const;
+    juce::String defaultFlashKey() const;
+    bool loadDefaultFlash(std::vector<hydra::Machine::Config::FlashBlock>& out) const;
+    void saveDefaultFlash(const std::vector<hydra::Machine::Config::FlashBlock>& flash) const;
+    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);  // for callAsync
 
     // Starts (or restarts) the emulator with the current firmware and `flash`.
     void restartEmulator(std::vector<hydra::Machine::Config::FlashBlock> flash);
@@ -87,6 +113,11 @@ private:
     std::array<juce::AudioParameterInt*, ccmap::kEntries.size()> ccParameters_{};
     std::array<std::atomic<bool>, ccmap::kEntries.size()> ccDirty_{};
     juce::AudioParameterFloat* outputGain_ = nullptr;
+    // For readControllers(); written on the audio thread.
+    std::array<std::atomic<int>, 128> lastCc_{};
+    std::atomic<std::uint32_t> ccSerial_{0};
+    void noteController(int number, int value);
+    static int scaleController(int number, int value);
     std::atomic<bool> restoringState_{false};
 
     // The audio thread only try-locks emulatorLock_, which is held just for swapping

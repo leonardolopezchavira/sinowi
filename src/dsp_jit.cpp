@@ -1,5 +1,7 @@
 #include "dsp_jit.h"
 
+#if defined(__x86_64__)
+
 #include <vector>
 
 namespace hydra::dsp {
@@ -764,3 +766,5 @@ void DspJit::emitInstruction(const Instruction& in, std::uint32_t length, const 
 }
 
 }  // namespace hydra::dsp
+
+#endif  // __x86_64__

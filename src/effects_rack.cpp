@@ -2,9 +2,7 @@
 
 #include <chrono>
 
-#if defined(__x86_64__) || defined(__i386__)
-#include <immintrin.h>
-#endif
+#include "host_arch.h"
 
 #include "threads.h"
 
@@ -16,9 +14,7 @@ template <typename Done>
 void waitUntil(Done done) {
     for (int spins = 0; !done(); ++spins) {
         if (spins < 4096) {
-#if defined(__x86_64__) || defined(__i386__)
-            _mm_pause();
-#endif
+            hydra::cpuRelax();
         } else {
             std::this_thread::yield();
         }

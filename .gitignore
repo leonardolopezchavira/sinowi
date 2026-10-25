@@ -6,3 +6,7 @@ external/
 *.hydra
 __pycache__/
 *.pyc
+# Local build helpers and logs (macOS)
+.tools/
+build-macos.log
+.DS_Store

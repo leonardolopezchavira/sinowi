@@ -3,9 +3,7 @@
 #include <atomic>
 #include <chrono>
 
-#if defined(__x86_64__) || defined(__i386__)
-#include <immintrin.h>
-#endif
+#include "host_arch.h"
 
 namespace hydra {
 
@@ -33,10 +31,8 @@ T spinThenWait(const std::atomic<T>& atomic, Ready ready, std::chrono::nanosecon
             return value;
         if (spins % 64 == 0 && Clock::now() > until)
             atomic.wait(value, std::memory_order_acquire);
-#if defined(__x86_64__) || defined(__i386__)
         else
-            _mm_pause();
-#endif
+            cpuRelax();
     }
 }
 

@@ -1,6 +1,6 @@
 #include "bus.h"
 
-#include <x86intrin.h>
+#include "host_arch.h"
 
 #include <algorithm>
 #include <cstring>
@@ -72,11 +72,11 @@ const MmioBus::Mapping* MmioBus::find(std::uint32_t addr) const {
 std::uint32_t MmioBus::read(std::uint32_t addr, int size) {
     if (const Mapping* m = find(addr)) {
         if (profiling) [[unlikely]] {
-            const std::uint64_t start = __rdtsc();
+            const std::uint64_t start = hydra::cycleCounter();
             const std::uint32_t value = m->device->read(addr - m->base, size);
             DeviceStats& s = stats_[m->device];
             ++s.reads;
-            s.cycles += __rdtsc() - start;
+            s.cycles += hydra::cycleCounter() - start;
             return value;
         }
         const std::uint32_t value = m->device->read(addr - m->base, size);
@@ -91,11 +91,11 @@ std::uint32_t MmioBus::read(std::uint32_t addr, int size) {
 void MmioBus::write(std::uint32_t addr, std::uint32_t value, int size) {
     if (const Mapping* m = find(addr)) {
         if (profiling) [[unlikely]] {
-            const std::uint64_t start = __rdtsc();
+            const std::uint64_t start = hydra::cycleCounter();
             m->device->write(addr - m->base, value, size);
             DeviceStats& s = stats_[m->device];
             ++s.writes;
-            s.cycles += __rdtsc() - start;
+            s.cycles += hydra::cycleCounter() - start;
             return;
         }
         if (log_.all && dynamic_cast<StubDevice*>(m->device) == nullptr)

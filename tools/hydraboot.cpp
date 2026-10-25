@@ -74,8 +74,12 @@ using namespace hydra;
 #include <ctime>
 #include <sys/syscall.h>
 #include <sys/time.h>
-#include <x86intrin.h>
+#include "host_arch.h"
+#if defined(__APPLE__)
+#include <sys/ucontext.h>  // <ucontext.h> needs _XOPEN_SOURCE on macOS
+#else
 #include <ucontext.h>
+#endif
 #include <unistd.h>
 
 namespace {
@@ -83,10 +87,22 @@ constexpr std::size_t kMaxSamples = 1 << 20;
 std::uintptr_t gSamples[kMaxSamples];
 std::atomic<std::size_t> gSampleCount{0};
 
+std::uintptr_t samplePc(const ucontext_t* uc) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    return static_cast<std::uintptr_t>(uc->uc_mcontext->__ss.__pc);
+#elif defined(__APPLE__)
+    return static_cast<std::uintptr_t>(uc->uc_mcontext->__ss.__rip);
+#elif defined(__aarch64__)
+    return static_cast<std::uintptr_t>(uc->uc_mcontext.pc);
+#else
+    return static_cast<std::uintptr_t>(uc->uc_mcontext.gregs[REG_RIP]);
+#endif
+}
+
 void recordSample(int, siginfo_t*, void* context) {
     const std::size_t i = gSampleCount.fetch_add(1, std::memory_order_relaxed);
     if (i < kMaxSamples)
-        gSamples[i] = static_cast<std::uintptr_t>(static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
+        gSamples[i] = samplePc(static_cast<ucontext_t*>(context));
 }
 
 void startSampler() {
@@ -102,6 +118,14 @@ void startSampler() {
         setitimer(ITIMER_PROF, &interval, nullptr);
         return;
     }
+#if !defined(__linux__)
+    // Per-thread CPU-time timers are Linux-only: sample the whole process instead.
+    sigaction(SIGPROF, &action, nullptr);
+    itimerval profInterval{};
+    profInterval.it_interval.tv_usec = 200;
+    profInterval.it_value.tv_usec = 200;
+    setitimer(ITIMER_PROF, &profInterval, nullptr);
+#else
     sigaction(SIGRTMIN + 3, &action, nullptr);
     sigevent event{};
     event.sigev_notify = SIGEV_THREAD_ID;
@@ -113,6 +137,7 @@ void startSampler() {
     interval.it_interval.tv_nsec = 200000;
     interval.it_value.tv_nsec = 200000;
     timer_settime(timer, 0, &interval, nullptr);
+#endif
 }
 
 void writeSamples(const char* path) {
@@ -416,7 +441,7 @@ int main(int argc, char** argv) {
         // thread's time goes (slices, JIT exits, device accesses).
         const bool hostProfile = std::getenv("HYDRA_HOST_PROFILE") != nullptr;
         const auto hostStart = std::chrono::steady_clock::now();
-        const std::uint64_t tscStart = __rdtsc(), ticksStart = machine.cpu().ticksExecuted();
+        const std::uint64_t tscStart = hydra::cycleCounter(), ticksStart = machine.cpu().ticksExecuted();
         const std::uint64_t idleStart = machine.idleTicks(), skippedStart = machine.cpu().ticksSkipped();
         const std::uint64_t svcStart = machine.cpu().svcCount, sysStart = machine.cpu().systemInstructions;
         const std::array<std::uint64_t, 32> irqStart = machine.intc().raisedCounts();
@@ -744,7 +769,7 @@ int main(int argc, char** argv) {
         std::printf("\n");
         if (hostProfile) {
             const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - hostStart).count();
-            const double tscPerNs = static_cast<double>(__rdtsc() - tscStart) / (wall * 1e9);
+            const double tscPerNs = static_cast<double>(hydra::cycleCounter() - tscStart) / (wall * 1e9);
             const double emulated = static_cast<double>(machine.cpu().ticksExecuted() - ticksStart) / Machine::kCpuHz;
             const Machine::Profile& p = machine.profile();
             const auto ms = [&](double ns) { return ns / 1e6 / emulated; };  // per emulated second

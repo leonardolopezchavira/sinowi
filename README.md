@@ -1,8 +1,14 @@
-# Sydrahynth
+# Sinowi
 
-Sydrahynth is a Linux plugin that emulates ASM's Hydrasynth Desktop. It runs ASM's own
-Hydrasynth Desktop firmware on an emulated main board. No firmware is included:
-you supply `Hydrasynth_Desktop_Firmware_2.2.0.dat` from ASM's firmware pack.
+Sinowi is a plugin (VST3, AU, standalone) that emulates ASM's Hydrasynth Desktop,
+for Apple Silicon Macs (and Linux). It runs ASM's own Hydrasynth Desktop firmware
+on an emulated main board. No firmware is included: you supply
+`Hydrasynth_Desktop_Firmware_2.2.0.dat` from ASM's firmware pack.
+
+Sinowi is based on [Sydrahynth](https://github.com/systemfreund/sydrahynth), the
+Linux plugin by systemfreund, ported to Apple Silicon with further changes; see
+`CHANGES-APPLE-SILICON.md`. It keeps Sydrahynth's plugin IDs, so projects saved
+with Sydrahynth open with Sinowi.
 
 
 
@@ -17,8 +23,8 @@ https://github.com/user-attachments/assets/9b7ed8db-5732-41ab-bc41-2bdd0075680c
     cmake --build build
 
 This builds the tools and, with JUCE fetched, the plugin as VST3, LV2 and a
-standalone app in `build/Sydrahynth_artefacts/<config>/`. Install by
-copying `VST3/Sydrahynth.vst3` to `~/.vst3/` and `LV2/Sydrahynth.lv2` to
+standalone app in `build/Sinowi_artefacts/<config>/`. Install by
+copying `VST3/Sinowi.vst3` to `~/.vst3/` and `LV2/Sinowi.lv2` to
 `~/.lv2/`.
 
 The default configuration is `RelWithDebInfo` (`-O2` with debug symbols, a
@@ -29,14 +35,34 @@ directory of its own:
     cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
     cmake --build build-release
 
-The plugin is then in `build-release/Sydrahynth_artefacts/Release/`. The gain
+The plugin is then in `build-release/Sinowi_artefacts/Release/`. The gain
 is modest because most of the time goes to code the JITs generate at run
 time, which the compiler flags do not affect.
 
+## macOS (Apple Silicon)
+
+The emulator also builds natively on arm64: the DSP cores then run on
+`src/dsp_jit_arm64.cpp`, an arm64 port of the x86-64 DSP JIT (bit-exact with
+the interpreter, like the original), and Dynarmic uses its arm64 backend.
+Needs the Xcode command line tools, CMake and Ninja.
+
+```
+scripts/fetch-deps.sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+This builds `Sinowi.app` (standalone), `Sinowi.component` (AU) and
+`Sinowi.vst3` in `build/Sinowi_artefacts/Release/`. Copy the AU to
+`~/Library/Audio/Plug-Ins/Components/` and the VST3 to
+`~/Library/Audio/Plug-Ins/VST3/`. The firmware is looked for in
+`~/Library/Application Support/sinowi/` unless chosen in the plugin window.
+
 ## License
 
-Sydrahynth is free software, licensed under the GNU Affero General Public
-License version 3 (SPDX: `AGPL-3.0-only`); see `LICENSE`. It builds on JUCE
+Sinowi is free software, licensed under the GNU Affero General Public
+License version 3 (SPDX: `AGPL-3.0-only`); see `LICENSE`. It is a modified version
+of Sydrahynth (https://github.com/systemfreund/sydrahynth), under the same licence. It builds on JUCE
 (used here under its AGPLv3 option), Dynarmic and Xbyak, each under its own
 licence.
 
@@ -47,8 +73,8 @@ this project is not affiliated with or endorsed by ASM.
 ## Plugin
 
 - Firmware: choose the `.dat` file in the plugin window (stored in
-  `~/.config/sydrahynth/sydrahynth.settings`), or put it into
-  `~/.local/share/sydrahynth/`, or set `HYDRA_FIRMWARE`.
+  `~/.config/sinowi/sinowi.settings`), or put it into
+  `~/.local/share/sinowi/`, or set `HYDRA_FIRMWARE`.
 - The emulator runs on its own threads, ahead of the host by the latency chosen
   in the editor (6, 12, 23 or 46 ms; default 12 ms, and always at least a host
   block plus about 3 ms); MIDI goes to the instrument's MIDI input, the output

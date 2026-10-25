@@ -4,11 +4,86 @@
 #include <atomic>
 #include <cstdint>
 
-#include <xbyak/xbyak.h>
-
 #include "dsp_core.h"
 
+#if defined(__x86_64__)
+#include <xbyak/xbyak.h>
+#elif defined(__aarch64__)
+#include <oaknut/code_block.hpp>
+#include <oaknut/oaknut.hpp>
+#endif
+
 namespace hydra::dsp {
+
+#if defined(__aarch64__)
+// arm64 version of the x86-64 DSP JIT below (dsp_jit_arm64.cpp), same design and
+// semantics. x19 = core, x20 = instructions executed, x21 = budget,
+// x22 = registers, x23 = data memory, x24 = &executed, x25 = block table, x26 = &flush_.
+class DspJit {
+public:
+    explicit DspJit(DspCore& core);
+
+    std::uint64_t run(std::uint64_t budget);
+    void invalidate() { flush_.store(true, std::memory_order_release); }
+
+private:
+    enum Exit : std::uint32_t { kNormal, kIdle, kBudget };
+    using Enter = std::uint32_t (*)(DspCore* core, const void* code, std::uint64_t* executed, std::uint64_t budget);
+
+    struct Instruction {
+        std::uint32_t pc;
+        Decoded d;
+    };
+
+    void flushAll();
+    void emitCommon();
+    const void* compile(std::uint32_t pc);
+    void emitInstruction(const Instruction& in, std::uint32_t length, const void* blockEntry, std::uint32_t blockStart);
+    void emitGoto(std::uint32_t target, std::uint32_t length, const void* blockEntry, std::uint32_t blockStart);
+    void emitGotoW8(std::uint32_t length);
+    void emitBackwardBranch(std::uint32_t target, std::uint32_t length, const void* blockEntry, std::uint32_t blockStart);
+    void emitFallback(const Instruction& in, bool controlFlow, std::uint32_t length);
+    void emitDataLoad();
+    void emitDataLoad(std::uint32_t address);
+    void emitDataStore();
+    void emitDataStore(std::uint32_t address);
+    void emitIoRead();
+    void emitIoWrite();
+    void emitIncrementWrites();
+    void emitClampS32(oaknut::XReg x);
+    void emitCall(const void* function);
+    // Conditional or compare-and-branch to an address that may be out of short range.
+    void emitBranchFar(oaknut::Cond cond, const void* target);
+    void emitCbzFar(bool nonZero, oaknut::WReg w, const void* target);
+    // Core fields by byte offset from x19 (any offset).
+    void loadCore32(oaknut::WReg w, std::int32_t offset);
+    void storeCore32(oaknut::WReg w, std::int32_t offset);
+    void loadReg(oaknut::WReg w, int index);
+    void storeReg(oaknut::WReg w, int index);
+    const void* here() const;
+
+    DspCore& core_;
+    oaknut::CodeBlock block_;
+    oaknut::CodeGenerator code_;
+    std::array<const void*, DspCore::kProgramWords> blocks_{};
+    std::atomic<bool> flush_{false};
+    Enter enter_ = nullptr;
+    const void* dispatch_ = nullptr;  // w8 = next pc
+    const void* exitNormal_ = nullptr;
+    const void* exitIdle_ = nullptr;
+    const void* exitCommon_ = nullptr;
+
+    std::int32_t pcOffset_, pendingOffset_, writesOffset_, spOffset_, stackOffset_, inInterruptOffset_, regsOffset_;
+};
+#elif !defined(__x86_64__)
+// The DSP JIT emits x86-64; on other hosts (arm64) the interpreter runs the cores.
+class DspJit {
+public:
+    explicit DspJit(DspCore&) {}
+    std::uint64_t run(std::uint64_t) { return 0; }
+    void invalidate() {}
+};
+#else
 
 // Translates a DspCore's program to x86-64, a basic block at a time, with the
 // interpreter's exact semantics (DspCore::interpret stays the reference):
@@ -77,5 +152,7 @@ private:
     // Offsets of the core's state from the DspCore pointer.
     std::int32_t pcOffset_, pendingOffset_, writesOffset_, spOffset_, stackOffset_, inInterruptOffset_, regsOffset_;
 };
+
+#endif  // __x86_64__
 
 }  // namespace hydra::dsp

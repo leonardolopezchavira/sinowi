@@ -10,16 +10,21 @@ constexpr int kStateVersion = 1;
 
 juce::PropertiesFile::Options settingsOptions() {
     juce::PropertiesFile::Options options;
-    options.applicationName = "sydrahynth";
-    options.folderName = ".config/sydrahynth";  // on Linux relative to the home directory
+    options.applicationName = "sinowi";
+#if JUCE_MAC
+    options.folderName = "sinowi";  // ~/Library/Application Support/sinowi
+#else
+    options.folderName = ".config/sinowi";  // on Linux relative to the home directory
+#endif
     options.filenameSuffix = "settings";
     options.osxLibrarySubFolder = "Application Support";
     return options;
 }
 
 // System settings for a fresh instrument: program change reception on, so the
-// host's program changes select patches.
-std::map<std::pair<int, int>, std::int16_t> initialSystemSettings() { return {{{5, 7}, 1}}; }
+// host's program changes select patches, and Param RX = CC (0 off, 1 NRPN, 2 CC),
+// so MIDI CCs (controllers, the host parameters) change the sound.
+std::map<std::pair<int, int>, std::int16_t> initialSystemSettings() { return {{{5, 1}, 2}, {{5, 7}, 1}}; }
 }  // namespace
 
 HydraProcessor::HydraProcessor()
@@ -37,9 +42,51 @@ HydraProcessor::HydraProcessor()
                                                 juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f,
                                                 juce::AudioParameterFloatAttributes().withLabel("dB"));
     addParameter(outputGain_);
+    for (auto& cc : lastCc_)
+        cc.store(-1, std::memory_order_relaxed);
+}
+
+// The firmware takes some arpeggiator CCs as the parameter's own value (a list
+// index, a percentage) and ignores values outside its range, so a controller's
+// 0-127 sweep would mostly do nothing. Those CCs are scaled onto the range the
+// firmware accepts (measured on firmware 2.2.0).
+int HydraProcessor::scaleController(int number, int value) {
+    struct Range {
+        int cc, low, high;
+    };
+    static constexpr Range kRanges[] = {
+        {106, 0, 11},   // Arp Division: 1/1 1/2 1/4 1/8 1/16 1/32, then the same as triplets
+        {107, 5, 100},  // Arp Gate, %
+        {108, 0, 7},    // Arp Mode: Up Down Up/Dn Up&Dn Order Rand Chord Phrase
+        {109, 0, 32},   // Arp Ratchet
+        {110, 0, 100},  // Arp Chance, %
+        {120, 1, 4},    // Arp Octave
+        {122, 0, 32},   // Arp Length (0 = Default)
+    };
+    for (const Range& r : kRanges)
+        if (r.cc == number)
+            return r.low + (value * (r.high - r.low) + 63) / 127;
+    return value;
+}
+
+void HydraProcessor::noteController(int number, int value) {
+    lastCc_[static_cast<std::size_t>(number & 127)].store(value, std::memory_order_relaxed);
+    ccSerial_.fetch_add(1, std::memory_order_release);
+}
+
+bool HydraProcessor::readControllers(std::array<int, 128>& out, std::uint32_t& serial) const {
+    const std::uint32_t now = ccSerial_.load(std::memory_order_acquire);
+    if (now == serial)
+        return false;
+    serial = now;
+    for (std::size_t i = 0; i < out.size(); ++i)
+        out[i] = lastCc_[i].load(std::memory_order_relaxed);
+    return true;
 }
 
 HydraProcessor::~HydraProcessor() {
+    *alive_ = false;
+    stopTimer();
     const std::lock_guard life(lifeMutex_);
     std::unique_ptr<hydra::Emulator> emulator;
     {
@@ -52,6 +99,123 @@ bool HydraProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const {
     return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
 }
 
+juce::File HydraProcessor::defaultBankFile() const {
+    const auto found = firmwareFile().getParentDirectory().findChildFiles(juce::File::findFiles, false, "*.hydra");
+    return found.isEmpty() ? juce::File() : found.getFirst();
+}
+
+void HydraProcessor::timerCallback() {
+    const std::lock_guard life(lifeMutex_);
+    if (!emulator_ || autoBank_ == AutoBank::Off) {
+        stopTimer();
+        return;
+    }
+    if (emulator_->state() == hydra::Emulator::State::Failed) {
+        autoBank_ = AutoBank::Off;
+        stopTimer();
+        return;
+    }
+    if (emulator_->state() != hydra::Emulator::State::Running || emulator_->uploading())
+        return;
+    if (autoBank_ == AutoBank::WaitForBoot) {
+        const juce::File bank = defaultBankFile();
+        if (!bank.existsAsFile() || loadBank(bank, 0).isNotEmpty()) {
+            autoBank_ = AutoBank::Off;
+            stopTimer();
+            return;
+        }
+        autoBank_ = AutoBank::Uploading;
+        return;
+    }
+    if (autoBank_ == AutoBank::Uploading) {
+        // Upload finished: select A001, then give the firmware a moment to write
+        // its settings before the flash is kept for later instruments.
+        emulator_->selectPatch(0, 0);
+        autoBank_ = AutoBank::Settle;
+        settleUntil_ = juce::Time::getMillisecondCounter() + 3000;
+        return;
+    }
+    if (juce::Time::getMillisecondCounter() < settleUntil_)
+        return;
+    const auto flash = emulator_->captureFlash();
+    if (!flash.empty())
+        saveDefaultFlash(flash);
+    autoBank_ = AutoBank::Off;
+    stopTimer();
+}
+
+juce::File HydraProcessor::defaultFlashFile() const { return firmwareFile().getParentDirectory().getChildFile("default-bank.flash"); }
+
+juce::String HydraProcessor::defaultFlashKey() const {
+    // By name, size and date (not the folder), so the kept flash survives the
+    // folder being moved or copied with its dates.
+    const auto describe = [](const juce::File& f) {
+        return f.getFileName() + "|" + juce::String(f.getSize()) + "|" + juce::String(f.getLastModificationTime().toMilliseconds());
+    };
+    return "v2|" + describe(firmwareFile()) + "|" + describe(defaultBankFile());
+}
+
+bool HydraProcessor::loadDefaultFlash(std::vector<hydra::Machine::Config::FlashBlock>& out) const {
+    const juce::File file = defaultFlashFile();
+    if (!file.existsAsFile() || !defaultBankFile().existsAsFile())
+        return false;
+    juce::FileInputStream input(file);
+    if (!input.openedOk())
+        return false;
+    juce::GZIPDecompressorInputStream gzip(input);
+    const juce::ValueTree tree = juce::ValueTree::readFromStream(gzip);
+    // Also the flash kept by Sydrahynth (Sinowi's former name) before its folder was
+    // carried over: same files, under ".../sydrahynth/", keyed by full path.
+    const auto legacyKey = [this] {
+        const auto describe = [](const juce::File& f) {
+            const juce::String path = f.getFullPathName().replace("Application Support/sinowi/", "Application Support/sydrahynth/");
+            return path + "|" + juce::String(f.getSize()) + "|" + juce::String(f.getLastModificationTime().toMilliseconds());
+        };
+        return "v1|" + describe(firmwareFile()) + "|" + describe(defaultBankFile());
+    };
+    const juce::String key = tree.getProperty("key").toString();
+    if ((!tree.hasType("SinowiDefaultFlash") && !tree.hasType("SydrahynthDefaultFlash")) ||
+        (key != defaultFlashKey() && key != legacyKey()))
+        return false;
+    std::vector<hydra::Machine::Config::FlashBlock> flash;
+    for (const auto& child : tree) {
+        const juce::MemoryBlock* data = child.getProperty("data").getBinaryData();
+        if (!data)
+            return false;
+        hydra::Machine::Config::FlashBlock block;
+        block.offset = static_cast<std::uint32_t>(static_cast<juce::int64>(child.getProperty("offset")));
+        const auto* bytes = static_cast<const std::uint8_t*>(data->getData());
+        block.bytes.assign(bytes, bytes + data->getSize());
+        flash.push_back(std::move(block));
+    }
+    if (flash.empty())
+        return false;
+    out = std::move(flash);
+    return true;
+}
+
+void HydraProcessor::saveDefaultFlash(const std::vector<hydra::Machine::Config::FlashBlock>& flash) const {
+    juce::ValueTree tree("SinowiDefaultFlash");
+    tree.setProperty("key", defaultFlashKey(), nullptr);
+    for (const auto& block : flash) {
+        juce::ValueTree child("flash");
+        child.setProperty("offset", static_cast<juce::int64>(block.offset), nullptr);
+        child.setProperty("data", juce::var(juce::MemoryBlock(block.bytes.data(), block.bytes.size())), nullptr);
+        tree.appendChild(child, nullptr);
+    }
+    // Written to a temporary file and moved into place, so a reader never sees half a file.
+    const juce::File file = defaultFlashFile();
+    juce::TemporaryFile temporary(file);
+    {
+        juce::FileOutputStream output(temporary.getFile());
+        if (!output.openedOk())
+            return;
+        juce::GZIPCompressorOutputStream gzip(output, 6);
+        tree.writeToStream(gzip);
+    }
+    temporary.overwriteTargetFileWithTemporary();
+}
+
 juce::File HydraProcessor::firmwareFile() const {
     auto& self = const_cast<HydraProcessor&>(*this);
     const juce::String stored = self.settings_.getUserSettings()->getValue("firmware");
@@ -59,8 +223,13 @@ juce::File HydraProcessor::firmwareFile() const {
         return juce::File(stored);
     if (const char* fromEnvironment = std::getenv("HYDRA_FIRMWARE"))
         return juce::File(juce::String(fromEnvironment));
+#if JUCE_MAC
+    const juce::File folder = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                                  .getChildFile("Application Support/sinowi");
+#else
     const juce::File folder =
-        juce::File::getSpecialLocation(juce::File::userHomeDirectory).getChildFile(".local/share/sydrahynth");
+        juce::File::getSpecialLocation(juce::File::userHomeDirectory).getChildFile(".local/share/sinowi");
+#endif
     const auto found = folder.findChildFiles(juce::File::findFiles, false, "*.dat");
     return found.isEmpty() ? juce::File() : found.getFirst();
 }
@@ -77,7 +246,18 @@ void HydraProcessor::setFirmwareFile(const juce::File& file) {
 
 void HydraProcessor::restartEmulator(std::vector<hydra::Machine::Config::FlashBlock> flash) {
     const std::lock_guard life(lifeMutex_);
+    // A fresh instrument: start from the kept flash with the default bank if
+    // there is one, else upload the bank after booting (see timerCallback).
+    if (flash.empty())
+        loadDefaultFlash(flash);
     pendingFlash_ = flash;
+    autoBank_ = flash.empty() ? AutoBank::WaitForBoot : AutoBank::Off;
+    if (autoBank_ != AutoBank::Off) {
+        juce::MessageManager::callAsync([this, alive = alive_] {
+            if (*alive)
+                startTimer(250);
+        });
+    }
     hydra::Emulator::Config config;
     config.firmwarePath = firmwareFile().getFullPathName().toStdString();
     config.flash = std::move(flash);
@@ -133,6 +313,17 @@ void HydraProcessor::setBrowserVisible(bool visible) {
     settings_.saveIfNeeded();
 }
 
+int HydraProcessor::screenTint() const {
+    auto& self = const_cast<HydraProcessor&>(*this);
+    return self.settings_.getUserSettings()->getIntValue("screenTint", 0);
+}
+
+void HydraProcessor::setScreenTint(int tint) {
+    const std::lock_guard life(lifeMutex_);
+    settings_.getUserSettings()->setValue("screenTint", tint);
+    settings_.saveIfNeeded();
+}
+
 void HydraProcessor::setLatencyChoice(int choice) {
     {
         const std::lock_guard life(lifeMutex_);
@@ -172,12 +363,22 @@ void HydraProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
 
     for (const auto metadata : midi) {
         const juce::MidiMessage message = metadata.getMessage();
-        emulator.sendMidi(message.getRawData(), static_cast<std::size_t>(message.getRawDataSize()));
+        if (message.isController()) {
+            const int number = message.getControllerNumber();
+            const int value = scaleController(number, message.getControllerValue());
+            const std::uint8_t cc[3] = {message.getRawData()[0], static_cast<std::uint8_t>(number), static_cast<std::uint8_t>(value)};
+            emulator.sendMidi(cc, 3);
+            noteController(number, value);
+        } else {
+            emulator.sendMidi(message.getRawData(), static_cast<std::size_t>(message.getRawDataSize()));
+        }
     }
     for (std::size_t i = 0; i < ccParameters_.size(); ++i)
         if (ccDirty_[i].exchange(false)) {
-            const std::uint8_t cc[3] = {0xB0, ccmap::kEntries[i].cc, static_cast<std::uint8_t>(ccParameters_[i]->get())};
+            const std::uint8_t cc[3] = {0xB0, ccmap::kEntries[i].cc,
+                                        static_cast<std::uint8_t>(scaleController(ccmap::kEntries[i].cc, ccParameters_[i]->get()))};
             emulator.sendMidi(cc, 3);
+            noteController(cc[1], cc[2]);
         }
 
     pullAudio(buffer, emulator);
@@ -209,7 +410,7 @@ void HydraProcessor::pullAudio(juce::AudioBuffer<float>& buffer, hydra::Emulator
 }
 
 void HydraProcessor::getStateInformation(juce::MemoryBlock& destData) {
-    juce::ValueTree state("Sydrahynth");
+    juce::ValueTree state("Sinowi");
     state.setProperty("version", kStateVersion, nullptr);
     for (std::size_t i = 0; i < ccParameters_.size(); ++i)
         state.setProperty("cc" + juce::String(ccmap::kEntries[i].cc), ccParameters_[i]->get(), nullptr);
@@ -242,7 +443,7 @@ void HydraProcessor::setStateInformation(const void* data, int sizeInBytes) {
     if (!xml)
         return;
     const juce::ValueTree state = juce::ValueTree::fromXml(*xml);
-    if (!state.hasType("Sydrahynth"))
+    if (!state.hasType("Sinowi") && !state.hasType("Sydrahynth"))  // Sinowi's former name
         return;
 
     restoringState_ = true;

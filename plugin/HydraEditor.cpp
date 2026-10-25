@@ -6,7 +6,7 @@
 #include "HydraProcessor.h"
 
 HydraEditor::HydraEditor(HydraProcessor& owner) : AudioProcessorEditor(owner), processor_(owner), browser_(owner), panel_(owner) {
-    title_.setText("Sydrahynth", juce::dontSendNotification);
+    title_.setText("Sinowi", juce::dontSendNotification);
     title_.setFont(juce::FontOptions(18.0f, juce::Font::bold));
     for (juce::Label* label : {&title_, &firmware_, &status_})
         addAndMakeVisible(*label);

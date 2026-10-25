@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(sydrahynth VERSION 0.1.0 LANGUAGES C CXX)
+project(sinowi VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +15,12 @@ set(DYNARMIC_FRONTENDS "A32" CACHE STRING "" FORCE)
 set(DYNARMIC_TESTS OFF CACHE BOOL "" FORCE)
 set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
 set(DYNARMIC_USE_BUNDLED_EXTERNALS ON CACHE BOOL "" FORCE)
+# Boost (headers only) is needed by Dynarmic and by its IR headers that hydra_core uses.
+# scripts/fetch-deps.sh puts the headers into external/boost when the system has none.
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/boost/version.hpp AND NOT Boost_INCLUDE_DIR)
+    set(Boost_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/boost)
+endif()
+find_package(Boost 1.57 REQUIRED)
 add_subdirectory(external/dynarmic EXCLUDE_FROM_ALL)
 
 add_library(hydra_core STATIC
@@ -28,6 +34,7 @@ add_library(hydra_core STATIC
     src/dsp_block.cpp
     src/dsp_core.cpp
     src/dsp_jit.cpp
+    src/dsp_jit_arm64.cpp
     src/effects_rack.cpp
     src/emulator.cpp
     src/fx_dsp.cpp
@@ -46,7 +53,15 @@ add_library(hydra_core STATIC
     src/wave_rom.cpp
 )
 target_include_directories(hydra_core PUBLIC src)
-target_link_libraries(hydra_core PUBLIC dynarmic merry::mcl PRIVATE xbyak::xbyak)
+target_link_libraries(hydra_core PUBLIC dynarmic merry::mcl)
+# Dynarmic's IR headers (used by cpu.cpp, cortex_m3.cpp) need Boost headers.
+target_link_libraries(hydra_core PRIVATE Boost::boost)
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    target_link_libraries(hydra_core PRIVATE xbyak::xbyak)
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+    # The DSP JIT for arm64 (dsp_jit_arm64.cpp) uses oaknut, which Dynarmic vendors.
+    target_link_libraries(hydra_core PRIVATE merry::oaknut)
+endif()
 # Same Xbyak configuration as Dynarmic: its inline functions are shared (ODR).
 target_compile_definitions(hydra_core PRIVATE XBYAK_STRICT_CHECK_MEM_REG_SIZE=0)
 target_compile_options(hydra_core PRIVATE -Wall -Wextra)
@@ -77,12 +92,22 @@ target_compile_options(emurun PRIVATE -Wall -Wextra)
 option(HYDRA_BUILD_PLUGIN "Build the VST3/LV2/standalone plugin" ON)
 if (HYDRA_BUILD_PLUGIN AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/external/JUCE/CMakeLists.txt)
     add_subdirectory(external/JUCE EXCLUDE_FROM_ALL)
-    juce_add_plugin(Sydrahynth
-        PRODUCT_NAME "Sydrahynth"
-        COMPANY_NAME "sydrahynth"
+    if (APPLE)
+        set(HYDRA_PLUGIN_FORMATS AU VST3 Standalone)
+    else()
+        set(HYDRA_PLUGIN_FORMATS VST3 LV2 Standalone)
+    endif()
+    # Sinowi was called Sydrahynth: the plugin and manufacturer codes (and the LV2
+    # URI) stay the same, so hosts open projects saved with Sydrahynth with Sinowi.
+    juce_add_plugin(Sinowi
+        PRODUCT_NAME "Sinowi"
+        COMPANY_NAME "sinowi"
         PLUGIN_MANUFACTURER_CODE Sydr
         PLUGIN_CODE Sdhy
-        FORMATS VST3 LV2 Standalone
+        FORMATS ${HYDRA_PLUGIN_FORMATS}
+        BUNDLE_ID org.sinowi.Sinowi
+        ICON_BIG ${CMAKE_CURRENT_SOURCE_DIR}/resources/icon.png
+        AU_MAIN_TYPE kAudioUnitType_MusicDevice
         IS_SYNTH TRUE
         NEEDS_MIDI_INPUT TRUE
         NEEDS_MIDI_OUTPUT FALSE
@@ -90,20 +115,20 @@ if (HYDRA_BUILD_PLUGIN AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/external/JUCE/CMak
         VST3_CATEGORIES Instrument Synth
         LV2URI "urn:sydrahynth:plugin"
         COPY_PLUGIN_AFTER_BUILD FALSE)
-    target_sources(Sydrahynth PRIVATE
+    target_sources(Sinowi PRIVATE
         plugin/HydraProcessor.cpp
         plugin/HydraEditor.cpp
         plugin/PanelView.cpp
         plugin/PatchBrowser.cpp)
-    target_include_directories(Sydrahynth PRIVATE plugin)
-    target_compile_definitions(Sydrahynth PUBLIC
+    target_include_directories(Sinowi PRIVATE plugin)
+    target_compile_definitions(Sinowi PUBLIC
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0)
-    target_link_libraries(Sydrahynth
+    target_link_libraries(Sinowi
         PRIVATE hydra_core juce::juce_audio_utils
         PUBLIC juce::juce_recommended_config_flags)
-    target_compile_options(Sydrahynth PRIVATE -Wall -Wextra)
+    target_compile_options(Sinowi PRIVATE -Wall -Wextra)
 
     # Headless host that loads the built VST3 (tools/plugintest.cpp).
     juce_add_console_app(plugintest PRODUCT_NAME "plugintest")

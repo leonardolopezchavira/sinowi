@@ -4,9 +4,7 @@
 #include <bit>
 #include <chrono>
 
-#if defined(__x86_64__) || defined(__i386__)
-#include <immintrin.h>
-#endif
+#include "host_arch.h"
 
 #include "threads.h"
 
@@ -36,9 +34,7 @@ constexpr std::uint64_t kOpenCores = 0xFF;  // in claims_
 constexpr std::chrono::nanoseconds kMaxSpin = std::chrono::microseconds(30), kMinSpin = std::chrono::microseconds(1);
 
 void pause() {
-#if defined(__x86_64__) || defined(__i386__)
-    _mm_pause();
-#endif
+    hydra::cpuRelax();
 }
 
 // Busy-waits briefly, then yields, so idle workers do not occupy a CPU for long.

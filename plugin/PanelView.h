@@ -46,19 +46,36 @@ private:
     void releaseShift(int delayMs);
     void setKnob(int knob, float value);
 
-    void paintDisplays(juce::Graphics& g);
-    void paintButtons(juce::Graphics& g);
+    // Drawing: what never changes while playing (panel, printing, knob and
+    // button bodies, bezels) is drawn once into background_ (paintStatic) at the
+    // screen's pixel resolution; paint() copies it and draws only the live parts
+    // (screens, LEDs, knob pointers, rings, pads), each only where it is dirty.
+    void resized() override;
+    void renderBackground(float pixelScale);
+    void paintStatic(juce::Graphics& g);
     void paintHeadings(juce::Graphics& g);
     void paintModuleLines(juce::Graphics& g);
-    void paintKnobs(juce::Graphics& g);
-    void paintEncoders(juce::Graphics& g);
+    void paintDisplays(juce::Graphics& g);
+    void paintButtonStates(juce::Graphics& g);
+    void paintKnobPointers(juce::Graphics& g);
+    void paintEncoderLights(juce::Graphics& g);
     void paintPads(juce::Graphics& g);
+    // Screen colours: a palette from the OLED levels; right-click a screen to switch.
+    void buildPalette();
+    void convertDisplay(int d, const hydra::Oled::Image& pixels);
+    void cycleScreenTint();
 
     HydraProcessor& processor_;
     std::unique_ptr<hydra::FrontPanel::Lights> lights_, shown_;  // the latest capture, and what is drawn
     std::uint64_t generation_ = 0;
     bool live_ = false;
     std::array<juce::Image, hydra::PanelDisplays::kCount> displays_;
+    juce::Image background_, brushed_;
+    juce::Point<int> backgroundSize_;
+    float backgroundScale_ = 0;
+    juce::uint32 resizedAt_ = 0;
+    int screenTint_ = 0;
+    std::array<juce::Colour, 256> palette_;
 
     // Mouse gesture state.
     Target active_;
@@ -68,5 +85,9 @@ private:
     bool shiftKeyHeld_ = false;  // the computer's Shift key, held while the mouse is over the panel
     void followShiftKey();
     std::array<float, hydra::FrontPanel::kKnobs> knobValues_{0.5f, 0.5f, 0.5f};  // cutoff, resonance, drive/morph
+    // The filter knobs follow incoming MIDI CCs for the filter they control.
+    std::array<int, 128> controllers_{}, controllersShown_{};
+    std::uint32_t controllerSerial_ = 0;
+    void followControllers();
     std::array<int, hydra::FrontPanel::kArpSwitches> arpPositions_{};
 };

@@ -1,6 +1,6 @@
 #include "cpu.h"
 
-#include <x86intrin.h>
+#include "host_arch.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -105,11 +105,11 @@ void CpuCore::retryAccess() {
 bool CpuCore::takeIrq() {
     if (cpsr() & arm::psr::I)
         return false;
-    const std::uint64_t start = profileExits ? __rdtsc() : 0;
+    const std::uint64_t start = profileExits ? hydra::cycleCounter() : 0;
     // LR_irq is the next instruction + 4 so that SUBS PC, LR, #4 resumes it.
     system_.enterException(arm::ExceptionKind::Irq, regs()[15] + 4);
     if (profileExits)
-        irqCycles += __rdtsc() - start;
+        irqCycles += hydra::cycleCounter() - start;
     return true;
 }
 
@@ -311,11 +311,11 @@ void CpuCore::InterpreterFallback(std::uint32_t pc, std::size_t num_instructions
 
 void CpuCore::CallSVC(std::uint32_t) {
     ++svcCount;
-    const std::uint64_t start = profileExits ? __rdtsc() : 0;
+    const std::uint64_t start = profileExits ? hydra::cycleCounter() : 0;
     // PC already points past the SVC, which is the preferred return address.
     system_.enterException(arm::ExceptionKind::SupervisorCall, regs()[15]);
     if (profileExits)
-        svcCycles += __rdtsc() - start;
+        svcCycles += hydra::cycleCounter() - start;
 }
 
 void CpuCore::ExceptionRaised(std::uint32_t pc, Exception exception) {
@@ -328,11 +328,11 @@ void CpuCore::ExceptionRaised(std::uint32_t pc, Exception exception) {
     switch (exception) {
     case Exception::SystemInstruction: {
         ++systemInstructions;
-        const std::uint64_t start = profileExits ? __rdtsc() : 0;
+        const std::uint64_t start = profileExits ? hydra::cycleCounter() : 0;
         if (!instruction || system_.execute(*instruction, pc) == arm::SystemState::Result::Unsupported)
             fail("unsupported system instruction " + describe());
         if (profileExits)
-            systemInstructionCycles += __rdtsc() - start;
+            systemInstructionCycles += hydra::cycleCounter() - start;
         return;
     }
     case Exception::WaitForInterrupt:

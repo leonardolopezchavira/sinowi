@@ -233,7 +233,7 @@ DspCore::DspCore(int id, Host& host, Memory memory) : id_(id), host_(host), mem_
 DspCore::~DspCore() = default;
 
 bool DspCore::jitByDefault() {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     static const bool enabled = [] {
         const char* setting = std::getenv("HYDRA_DSP_JIT");
         return !setting || std::string_view(setting) != "0";
@@ -245,7 +245,7 @@ bool DspCore::jitByDefault() {
 }
 
 void DspCore::setJit(bool enabled) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     if (enabled && !jit_)
         jit_ = std::make_unique<DspJit>(*this);
     else if (!enabled)

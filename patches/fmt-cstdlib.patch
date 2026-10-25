@@ -1,0 +1,12 @@
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index 81c97a0..c2c7a0e 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -42,6 +42,7 @@
+ 
+ #ifndef FMT_MODULE
+ #  include <cmath>    // std::signbit
++#  include <cstdlib>  // malloc, free (needed with newer libc++)
+ #  include <cstddef>  // std::byte
+ #  include <cstdint>  // uint32_t
+ #  include <cstring>  // std::memcpy

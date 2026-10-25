@@ -110,6 +110,8 @@ juce::Rectangle<float> padBounds(int row, int column) {
 juce::Rectangle<float> buttonBounds(const Button& b) { return {b.x - b.w / 2, b.y - b.h / 2, b.w, b.h}; }
 juce::Point<float> encoderCentre(int e) { return {kEncoderX[e & 3], kEncoderY[e >> 2]}; }
 
+constexpr juce::uint32 kResizeSettleMs = 150;  // see paint()
+const juce::Rectangle<float> kPlate(20, 20, 1960 - 40, 1000 - 40);  // the faceplate on the canvas
 const juce::Colour kBackground(0xff1b1d21), kPanel(0xff26292e), kLabel(0xffb8bcc4), kLed(0xffffd27a), kOrange(0xffe0702a);
 
 // The WS2812 LEDs run dim: show the hue at full brightness, faded by the level.
@@ -127,8 +129,12 @@ juce::Colour ledColour(std::uint32_t rgb, juce::Colour off) {
 
 PanelView::PanelView(HydraProcessor& processor)
     : processor_(processor), lights_(std::make_unique<hydra::FrontPanel::Lights>()) {
-    for (auto& image : displays_)
-        image = juce::Image(juce::Image::RGB, hydra::Oled::kWidth, hydra::Oled::kHeight, true);
+    screenTint_ = processor_.screenTint();
+    buildPalette();
+    for (auto& image : displays_) {
+        image = juce::Image(juce::Image::RGB, hydra::Oled::kWidth, hydra::Oled::kHeight, false);
+        image.clear(image.getBounds(), palette_[0]);
+    }
     setOpaque(true);
     startTimerHz(60);
 }
@@ -149,8 +155,58 @@ void PanelView::followShiftKey() {
     repaint();
 }
 
+// The filter knobs are pots: the firmware reads their position but never moves
+// them. When a MIDI CC changes what a knob controls, the knob is drawn at that
+// value (only drawn: the pot the firmware reads stays put, so nothing is sent).
+// Which filter the knobs control follows the FILTER 1 / FILTER 2 button lights.
+void PanelView::followControllers() {
+    if (controllerSerial_ == 0)
+        controllersShown_.fill(-1);
+    if (!processor_.readControllers(controllers_, controllerSerial_))
+        return;
+    constexpr int kFilter1Led = 26, kFilter2Led = 27;
+    const bool filter2 = live_ && lights_ && lights_->buttons[kFilter2Led] > lights_->buttons[kFilter1Led];
+    // Cutoff, resonance, drive/morph: CC 74, 71, 50 (Filter 1) or 55, 56 and none (Filter 2).
+    constexpr int kFilter1Cc[hydra::FrontPanel::kKnobs] = {74, 71, 50};
+    constexpr int kFilter2Cc[hydra::FrontPanel::kKnobs] = {55, 56, -1};
+    bool moved = false;
+    for (int k = 0; k < hydra::FrontPanel::kKnobs; ++k) {
+        const int cc = filter2 ? kFilter2Cc[k] : kFilter1Cc[k];
+        if (cc < 0)
+            continue;
+        const int value = controllers_[static_cast<std::size_t>(cc)];
+        if (value < 0 || value == controllersShown_[static_cast<std::size_t>(cc)])
+            continue;
+        knobValues_[static_cast<std::size_t>(k)] = static_cast<float>(value) / 127.0f;
+        moved = true;
+    }
+    // The arpeggiator switches: Mode (CC 108, 0-7), Octave (CC 120, 1-4) and
+    // Division (CC 106: the switch has 1/4, 1/8, 1/16, 1/32 = values 2-5).
+    const auto follow = [&](int cc, int switchIndex, int firstValue) {
+        const int value = controllers_[static_cast<std::size_t>(cc)];
+        if (value < 0 || value == controllersShown_[static_cast<std::size_t>(cc)])
+            return;
+        const int position = value - firstValue;
+        if (position < 0 || position >= hydra::FrontPanel::kArpPositions[static_cast<std::size_t>(switchIndex)])
+            return;  // a value the switch has no position for
+        arpPositions_[static_cast<std::size_t>(switchIndex)] = position;
+        moved = true;
+    };
+    follow(108, hydra::FrontPanel::kArpMode, 0);
+    follow(120, hydra::FrontPanel::kArpOctave, 1);
+    follow(106, hydra::FrontPanel::kArpDivision, 2);
+    controllersShown_ = controllers_;
+    if (moved)
+        repaint();
+}
+
 void PanelView::timerCallback() {
     followShiftKey();
+    followControllers();
+    // After a resize, draw the background anew once the size has settled.
+    if (background_.isValid() && backgroundSize_ != getLocalBounds().getBottomRight() &&
+        juce::Time::getMillisecondCounter() - resizedAt_ > kResizeSettleMs)
+        repaint();
     if (!processor_.readPanel(*lights_, generation_))
         return;
     const bool first = !live_;
@@ -173,12 +229,7 @@ void PanelView::timerCallback() {
         if (!first && pixels == shown_->displays[i])
             continue;
         shown_->displays[i] = pixels;
-        juce::Image::BitmapData bitmap(displays_[i], juce::Image::BitmapData::writeOnly);
-        for (int y = 0; y < hydra::Oled::kHeight; ++y)
-            for (int x = 0; x < hydra::Oled::kWidth; ++x) {
-                const std::uint8_t v = pixels[static_cast<std::size_t>(y * hydra::Oled::kWidth + x)];
-                bitmap.setPixelColour(x, y, juce::Colour(v, v, v));
-            }
+        convertDisplay(d, pixels);
         mark(kDisplays[d].expanded(4));
     }
     for (const Button& b : kButtons) {
@@ -221,80 +272,188 @@ juce::Point<float> PanelView::toCanvas(juce::Point<float> p) const {
     return {p.x * kCanvasWidth / static_cast<float>(getWidth()), p.y * kCanvasHeight / static_cast<float>(getHeight())};
 }
 
-void PanelView::paint(juce::Graphics& g) {
-    g.fillAll(kBackground);
-    g.addTransform(juce::AffineTransform::scale(static_cast<float>(getWidth()) / kCanvasWidth,
-                                                static_cast<float>(getHeight()) / kCanvasHeight));
-    g.setColour(kPanel);
-    g.fillRoundedRectangle(20, 20, kCanvasWidth - 40, kCanvasHeight - 40, 16);
-    g.setColour(kLabel);
-    g.setFont(juce::FontOptions(40.0f, juce::Font::bold));
-    g.drawText("SYDRAHYNTH", juce::Rectangle<float>(70, 70, 420, 60), juce::Justification::centredLeft);
-    paintHeadings(g);
-    paintModuleLines(g);
-    paintDisplays(g);
-    paintButtons(g);
-    paintKnobs(g);
-    paintEncoders(g);
-    paintPads(g);
-    if (!live_) {
-        g.setColour(kLabel);
-        g.setFont(juce::FontOptions(28.0f));
-        g.drawText("waiting for the emulator...", kDisplays[0].expanded(200, 0).translated(0, 100),
-                   juce::Justification::centred);
+namespace {
+// Screen colours (lit, unlit), switched by right-clicking a screen.
+struct ScreenTint {
+    const char* name;
+    juce::uint32 lit, unlit;
+};
+const ScreenTint kScreenTints[] = {
+    {"White", 0xffeef4ff, 0xff060709},
+    {"Ice blue", 0xffa6e0ff, 0xff03060a},
+    {"Amber", 0xffffb54d, 0xff0a0603},
+    {"Green", 0xff86ffb8, 0xff030a06},
+};
+constexpr float kPixelFull = 175.0f;  // the brightest level the OLED model produces
+
+// The encoder rings: 15 LEDs over 270 degrees, from bottom left to bottom right.
+float ringAngle(int led) { return juce::MathConstants<float>::pi * (-0.75f + 1.5f * static_cast<float>(led) / 14.0f); }
+
+juce::Rectangle<float> circle(juce::Point<float> c, float r) { return juce::Rectangle<float>(2 * r, 2 * r).withCentre(c); }
+
+// A tile of brushed-metal grain: horizontal streaks that vary slowly along the
+// row, plus fine noise; white and black at low alpha over the panel colour.
+// Seamless (periodic in both directions), made once.
+juce::Image makeBrushedTile() {
+    constexpr int kSize = 512;
+    juce::Image tile(juce::Image::ARGB, kSize, kSize, true);
+    juce::Random random(0x5D1A);
+    std::vector<float> streak(kSize), phase(kSize);
+    std::vector<int> cycles(kSize);
+    for (int y = 0; y < kSize; ++y) {
+        streak[static_cast<std::size_t>(y)] = random.nextFloat() * 2 - 1;
+        phase[static_cast<std::size_t>(y)] = random.nextFloat() * juce::MathConstants<float>::twoPi;
+        cycles[static_cast<std::size_t>(y)] = 1 + random.nextInt(3);
     }
+    juce::Image::BitmapData data(tile, juce::Image::BitmapData::writeOnly);
+    for (int y = 0; y < kSize; ++y) {
+        const auto at = [&](int row) { return streak[static_cast<std::size_t>((row + kSize) % kSize)]; };
+        const float s = 0.5f * at(y) + 0.25f * (at(y - 1) + at(y + 1));
+        const auto row = static_cast<std::size_t>(y);
+        for (int x = 0; x < kSize; ++x) {
+            const float along = 0.55f + 0.45f * std::sin(juce::MathConstants<float>::twoPi * static_cast<float>(cycles[row] * x) / kSize + phase[row]);
+            const float n = s * along * 0.75f + (random.nextFloat() * 2 - 1) * 0.25f;
+            const auto alpha = static_cast<std::uint8_t>(std::min(255.0f, std::abs(n) * 20.0f));
+            data.setPixelColour(x, y, (n > 0 ? juce::Colours::white : juce::Colours::black).withAlpha(alpha));
+        }
+    }
+    return tile;
 }
 
-void PanelView::paintDisplays(juce::Graphics& g) {
-    g.setImageResamplingQuality(juce::Graphics::lowResamplingQuality);
-    for (int d = 0; d < hydra::PanelDisplays::kCount; ++d) {
-        const juce::Rectangle<float> r = kDisplays[d];
-        g.setColour(juce::Colours::black);
-        g.fillRect(r.expanded(4));
-        g.setOpacity(1.0f);
-        g.drawImage(displays_[static_cast<std::size_t>(d)], r, juce::RectanglePlacement::stretchToFit);
-    }
+// Text printed on the panel, with a faint shadow below it so it sits in the metal.
+void engrave(juce::Graphics& g, const juce::String& text, juce::Rectangle<float> r, juce::Justification j, juce::Colour colour) {
+    g.setColour(juce::Colours::black.withAlpha(0.55f));
+    g.drawText(text, r.translated(0, 1.2f), j);
+    g.setColour(colour);
+    g.drawText(text, r, j);
 }
 
-void PanelView::paintButtons(juce::Graphics& g) {
-    for (const Button& b : kButtons) {
-        const juce::Rectangle<float> r = buttonBounds(b);
-        const bool held = (active_.kind == Target::Kind::Button && &kButtons[active_.index] == &b) ||
-                          (b.id == kShiftButton && (shiftLatched_ || shiftForGesture_ || shiftKeyHeld_));
-        g.setColour(held ? juce::Colour(0xff4a4f58) : juce::Colour(0xff3a3e45));
-        g.fillRoundedRectangle(r, 5);
-        if (b.led >= 0) {
-            const float level = lights_->buttons[static_cast<std::size_t>(b.led)];
-            if (level > 0.01f) {
-                g.setColour(kLed.withAlpha(0.25f + 0.75f * level));
-                g.fillRoundedRectangle(r.reduced(3).removeFromBottom(5), 2);
-            }
-        }
-        g.setColour(kLabel);
-        g.setFont(juce::FontOptions(b.w < 72 && std::strlen(b.label) > 7 ? 10.0f : 12.0f));
-        g.drawFittedText(b.label, r.reduced(3, 2).toNearestInt().withTrimmedBottom(5), juce::Justification::centred, 2);
-        for (const Legend& legend : kShiftLegends)
-            if (legend.id == b.id) {
-                g.setColour(kOrange);
-                g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-                g.drawText(legend.text, juce::Rectangle<float>(r.getX() - 20, r.getBottom() + 3, r.getWidth() + 40, 14),
-                           juce::Justification::centred);
-            }
-        // The Control buttons' numbers: under the upper row, above the lower one.
-        if (b.id >= 33 && b.id <= 40) {
-            const int number = b.id - 32;
-            const float y = number <= 4 ? r.getBottom() + 3 : r.getY() - 17;
-            g.setColour(kLabel);
-            g.setFont(juce::FontOptions(12.0f));
-            g.drawText(juce::String(number), juce::Rectangle<float>(r.getX(), y, r.getWidth(), 14), juce::Justification::centred);
-        }
-        if (b.id == 61) {  // DOWN: the pair is labelled PAGE
-            g.setColour(kLabel);
-            g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
-            g.drawText("PAGE", juce::Rectangle<float>(r.getX() - 10, r.getBottom() + 4, r.getWidth() + 20, 14), juce::Justification::centred);
-        }
+void drawScrew(juce::Graphics& g, juce::Point<float> c) {
+    constexpr float r = 7;
+    g.setColour(juce::Colours::black.withAlpha(0.5f));
+    g.fillEllipse(circle(c.translated(0, 1), r + 1));
+    g.setGradientFill(juce::ColourGradient(juce::Colour(0xff9aa0a8), c.x - r, c.y - r, juce::Colour(0xff3b3f45), c.x + r, c.y + r, false));
+    g.fillEllipse(circle(c, r));
+    g.setColour(juce::Colours::black.withAlpha(0.65f));
+    g.drawLine(c.x - r * 0.6f, c.y - r * 0.6f, c.x + r * 0.6f, c.y + r * 0.6f, 1.6f);
+    g.drawLine(c.x - r * 0.6f, c.y + r * 0.6f, c.x + r * 0.6f, c.y - r * 0.6f, 1.6f);
+}
+
+// A machined knob: knurled skirt, spun-metal cap with fixed light from the top
+// left. Silver for the analog knobs and switches, gunmetal for the encoders.
+// Static: only the pointer moves (drawPointer).
+constexpr float kCapRatio = 0.76f;
+void drawMetalKnob(juce::Graphics& g, juce::Point<float> c, float r, bool dark) {
+    {  // shadow on the panel, falling slightly downwards
+        juce::ColourGradient shadow(juce::Colours::black.withAlpha(0.6f), c.x, c.y + r * 0.18f, juce::Colours::transparentBlack,
+                                    c.x + r * 1.4f, c.y + r * 0.18f, true);
+        g.setGradientFill(shadow);
+        g.fillEllipse(circle(c.translated(0, r * 0.18f), r * 1.4f));
+    }
+    const juce::Colour skirtTop = dark ? juce::Colour(0xff40444b) : juce::Colour(0xff969ca4);
+    const juce::Colour skirtBottom = dark ? juce::Colour(0xff111215) : juce::Colour(0xff2a2d32);
+    g.setGradientFill(juce::ColourGradient(skirtTop, c.x, c.y - r, skirtBottom, c.x, c.y + r, false));
+    g.fillEllipse(circle(c, r));
+    const int ridges = std::max(28, static_cast<int>(r * 1.7f));
+    const float ridgeWidth = std::max(0.8f, r * 0.035f);
+    for (int i = 0; i < ridges; ++i) {
+        const float angle = juce::MathConstants<float>::twoPi * static_cast<float>(i) / static_cast<float>(ridges);
+        g.setColour((i & 1) ? juce::Colours::white.withAlpha(dark ? 0.08f : 0.17f) : juce::Colours::black.withAlpha(0.32f));
+        g.drawLine(juce::Line<float>(c.getPointOnCircumference(r * 0.80f, angle), c.getPointOnCircumference(r * 0.985f, angle)), ridgeWidth);
+    }
+    g.setColour(juce::Colours::black.withAlpha(0.75f));
+    g.drawEllipse(circle(c, r), 1.2f);
+
+    const float rc = r * kCapRatio;
+    const juce::Colour capLight = dark ? juce::Colour(0xff80868f) : juce::Colour(0xffeef0f2);
+    const juce::Colour capDark = dark ? juce::Colour(0xff22252a) : juce::Colour(0xff767c85);
+    juce::ColourGradient cap(capLight, c.x - rc * 0.7f, c.y - rc * 0.8f, capDark, c.x + rc * 0.7f, c.y + rc * 0.9f, false);
+    cap.addColour(0.5, capLight.interpolatedWith(capDark, 0.45f));
+    g.setGradientFill(cap);
+    g.fillEllipse(circle(c, rc));
+    // Concentric machining marks.
+    const float step = std::max(0.9f, rc / 22.0f);
+    int ring = 0;
+    for (float rr = rc * 0.1f; rr < rc - 0.5f; rr += step, ++ring) {
+        g.setColour((ring & 1) ? juce::Colours::white.withAlpha(0.05f) : juce::Colours::black.withAlpha(0.06f));
+        g.drawEllipse(circle(c, rr), 0.6f);
+    }
+    // The cones of light a spun finish shows, opposite each other.
+    for (const float a : {-0.80f, juce::MathConstants<float>::pi - 0.80f}) {
+        juce::Path wedge;
+        wedge.addPieSegment(circle(c, rc), a - 0.24f, a + 0.24f, 0.0f);
+        g.setColour(juce::Colours::white.withAlpha(dark ? 0.08f : 0.22f));
+        g.fillPath(wedge);
+    }
+    // Rim: bright where the light hits, dark below.
+    g.setGradientFill(juce::ColourGradient(juce::Colours::white.withAlpha(0.6f), c.x, c.y - rc, juce::Colours::black.withAlpha(0.55f),
+                                           c.x, c.y + rc, false));
+    g.drawEllipse(circle(c, rc), std::max(1.0f, r * 0.045f));
+}
+
+// The knob's position mark on the cap (orange, as the panel's accents).
+void drawPointer(juce::Graphics& g, juce::Point<float> c, float r, float angle, juce::Colour colour) {
+    const float rc = r * kCapRatio;
+    const juce::Point<float> a = c.getPointOnCircumference(rc * 0.28f, angle), b = c.getPointOnCircumference(rc * 0.9f, angle);
+    g.setColour(juce::Colours::black.withAlpha(0.55f));
+    g.drawLine(juce::Line<float>(a, b).withShortenedStart(-0.5f), r * 0.12f);
+    g.setColour(colour);
+    g.drawLine(juce::Line<float>(a, b), r * 0.075f);
+}
+
+// A rubber button: body, top highlight, the LED slot at its bottom.
+juce::Rectangle<float> ledSlot(juce::Rectangle<float> button) { return button.reduced(4, 3).removeFromBottom(5); }
+void drawButtonBody(juce::Graphics& g, juce::Rectangle<float> r) {
+    g.setColour(juce::Colours::black.withAlpha(0.5f));
+    g.fillRoundedRectangle(r.translated(0, 2.5f).expanded(0.5f), 6);
+    g.setGradientFill(juce::ColourGradient(juce::Colour(0xff4a4e56), 0, r.getY(), juce::Colour(0xff2a2d32), 0, r.getBottom(), false));
+    g.fillRoundedRectangle(r, 5);
+    g.setColour(juce::Colours::white.withAlpha(0.13f));
+    g.drawLine(r.getX() + 5, r.getY() + 1.2f, r.getRight() - 5, r.getY() + 1.2f, 1.2f);
+    g.setColour(juce::Colours::black.withAlpha(0.6f));
+    g.drawRoundedRectangle(r, 5, 1.0f);
+}
+
+bool shows(juce::Graphics& g, juce::Rectangle<float> canvas) { return g.clipRegionIntersects(canvas.getSmallestIntegerContainer().expanded(2)); }
+}  // namespace
+
+namespace {
+// The detent of an arp switch position in the shared raster of eight (0 = bottom
+// left, clockwise), checked against the firmware's arp edit page.
+int arpSlot(int sw, int position) { return sw == hydra::FrontPanel::kArpOctave ? position + 4 : position; }
+
+// The printed position names, in the raster's order (empty: no detent).
+const char* const kArpLegends[hydra::FrontPanel::kArpSwitches][8] = {
+    {"UP", "DOWN", "UP / DN", "UP & DN", "ORDER", "RANDOM", "CHORD", "PHRASE"},
+    {"", "", "", "", "1", "2", "3", "4"},
+    {"1/4", "1/8", "1/16", "1/32", "", "", "", ""},
+    {"OFF", "52%", "54%", "58%", "62%", "66%", "70%", "75%"},
+};
+
+// The position names around an arp switch, each joined to its detent by a
+// leader line: the left four bottom to top, the right four top to bottom.
+void paintArpLegends(juce::Graphics& g, const Knob& k) {
+    const juce::Point<float> c(k.x, k.y);
+    constexpr float kRow = 12.5f;
+    g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
+    for (int slot = 0; slot < 8; ++slot) {
+        const char* legend = kArpLegends[k.index][slot];
+        if (!*legend)
+            continue;
+        const bool left = slot < 4;
+        const float angle = juce::MathConstants<float>::pi * (-0.75f + 1.5f * static_cast<float>(slot) / 7.0f);
+        const float y = left ? k.y + (1.5f - static_cast<float>(slot)) * kRow : k.y + (static_cast<float>(slot) - 5.5f) * kRow;
+        const float side = left ? -1.0f : 1.0f;
+        const juce::Point<float> from = c.getPointOnCircumference(k.radius + 3, angle);
+        const juce::Point<float> elbow(k.x + side * (k.radius + 12), y), end(k.x + side * (k.radius + 18), y);
+        g.setColour(juce::Colour(0xff7d828b));
+        g.drawLine(juce::Line<float>(from, elbow), 1.2f);
+        g.drawLine(juce::Line<float>(elbow, end), 1.2f);
+        const juce::Rectangle<float> box = left ? juce::Rectangle<float>(end.x - 2 - 60, y - 7, 60, 14) : juce::Rectangle<float>(end.x + 2, y - 7, 60, 14);
+        engrave(g, legend, box, left ? juce::Justification::centredRight : juce::Justification::centredLeft, kLabel);
     }
 }
+}  // namespace
 
 // The signal-flow lines of the Module Select section, drawn behind its buttons.
 void PanelView::paintModuleLines(juce::Graphics& g) {
@@ -368,61 +527,283 @@ void PanelView::paintHeadings(juce::Graphics& g) {
     g.setFont(juce::FontOptions(20.0f, juce::Font::bold));
     for (const Heading& h : kHeadings) {
         const juce::Rectangle<float> r(h.x - h.w / 2, h.y, h.w, 26);
-        g.setColour(juce::Colour(0xff1e2024));
+        // A recessed plate with the heading in orange.
+        g.setColour(juce::Colours::white.withAlpha(0.06f));
+        g.fillRoundedRectangle(r.translated(0, 1.2f), 4);
+        g.setColour(juce::Colour(0xff17191c));
         g.fillRoundedRectangle(r, 4);
         g.setColour(kOrange);
         g.drawText(h.text, r, juce::Justification::centred);
     }
 }
 
-namespace {
-// The detent of an arp switch position in the shared raster of eight (0 = bottom
-// left, clockwise), checked against the firmware's arp edit page.
-int arpSlot(int sw, int position) { return sw == hydra::FrontPanel::kArpOctave ? position + 4 : position; }
 
-// The printed position names, in the raster's order (empty: no detent).
-const char* const kArpLegends[hydra::FrontPanel::kArpSwitches][8] = {
-    {"UP", "DOWN", "UP / DN", "UP & DN", "ORDER", "RANDOM", "CHORD", "PHRASE"},
-    {"", "", "", "", "1", "2", "3", "4"},
-    {"1/4", "1/8", "1/16", "1/32", "", "", "", ""},
-    {"OFF", "52%", "54%", "58%", "62%", "66%", "70%", "75%"},
-};
+void PanelView::buildPalette() {
+    const ScreenTint& tint = kScreenTints[static_cast<std::size_t>(screenTint_) % std::size(kScreenTints)];
+    const juce::Colour lit(tint.lit), unlit(tint.unlit);
+    for (int v = 0; v < 256; ++v)
+        palette_[static_cast<std::size_t>(v)] = unlit.interpolatedWith(lit, std::min(1.0f, static_cast<float>(v) / kPixelFull));
+}
 
-// The position names around an arp switch, each joined to its detent by a
-// leader line: the left four bottom to top, the right four top to bottom.
-void paintArpLegends(juce::Graphics& g, const Knob& k) {
-    const juce::Point<float> c(k.x, k.y);
-    constexpr float kRow = 12.5f;
-    g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
-    for (int slot = 0; slot < 8; ++slot) {
-        const char* legend = kArpLegends[k.index][slot];
-        if (!*legend)
-            continue;
-        const bool left = slot < 4;
-        const float angle = juce::MathConstants<float>::pi * (-0.75f + 1.5f * static_cast<float>(slot) / 7.0f);
-        const float y = left ? k.y + (1.5f - static_cast<float>(slot)) * kRow : k.y + (static_cast<float>(slot) - 5.5f) * kRow;
-        const float side = left ? -1.0f : 1.0f;
-        const juce::Point<float> from = c.getPointOnCircumference(k.radius + 3, angle);
-        const juce::Point<float> elbow(k.x + side * (k.radius + 12), y), end(k.x + side * (k.radius + 18), y);
-        g.setColour(juce::Colour(0xff7d828b));
-        g.drawLine(juce::Line<float>(from, elbow), 1.2f);
-        g.drawLine(juce::Line<float>(elbow, end), 1.2f);
+void PanelView::convertDisplay(int d, const hydra::Oled::Image& pixels) {
+    juce::Image::BitmapData bitmap(displays_[static_cast<std::size_t>(d)], juce::Image::BitmapData::writeOnly);
+    for (int y = 0; y < hydra::Oled::kHeight; ++y)
+        for (int x = 0; x < hydra::Oled::kWidth; ++x)
+            bitmap.setPixelColour(x, y, palette_[pixels[static_cast<std::size_t>(y * hydra::Oled::kWidth + x)]]);
+}
+
+void PanelView::cycleScreenTint() {
+    screenTint_ = (screenTint_ + 1) % static_cast<int>(std::size(kScreenTints));
+    processor_.setScreenTint(screenTint_);
+    buildPalette();
+    if (shown_)
+        for (int d = 0; d < hydra::PanelDisplays::kCount; ++d)
+            convertDisplay(d, shown_->displays[static_cast<std::size_t>(d)]);
+    background_ = {};  // the glass behind the screens has the unlit colour
+    repaint();
+}
+
+void PanelView::resized() { resizedAt_ = juce::Time::getMillisecondCounter(); }
+
+// Everything that does not change while playing, drawn once into background_
+// at the screen's pixel resolution: panel, printed text, the module diagram,
+// knob and button bodies, screen bezels, pad frames. paint() copies it and
+// draws only the live parts on top.
+void PanelView::renderBackground(float pixelScale) {
+    const int w = std::max(1, juce::roundToInt(static_cast<float>(getWidth()) * pixelScale));
+    const int h = std::max(1, juce::roundToInt(static_cast<float>(getHeight()) * pixelScale));
+    background_ = juce::Image(juce::Image::RGB, w, h, false);
+    backgroundSize_ = getLocalBounds().getBottomRight();
+    backgroundScale_ = pixelScale;
+    if (!brushed_.isValid())
+        brushed_ = makeBrushedTile();
+    juce::Graphics g(background_);
+    g.fillAll(kBackground);
+    const juce::AffineTransform canvas = juce::AffineTransform::scale(static_cast<float>(w) / kCanvasWidth, static_cast<float>(h) / kCanvasHeight);
+
+    // The faceplate, in pixels: the grain tile is copied unscaled (cheap), not
+    // resampled through the canvas transform.
+    const juce::Rectangle<float> plate = kPlate.transformedBy(canvas);
+    const float corner = 16 * static_cast<float>(w) / kCanvasWidth;
+    g.setColour(juce::Colours::black.withAlpha(0.55f));
+    g.fillRoundedRectangle(plate.translated(0, 6 * static_cast<float>(h) / kCanvasHeight), corner * 1.1f);
+    juce::ColourGradient base(juce::Colour(0xff383b42), 0, plate.getY(), juce::Colour(0xff1d1f23), 0, plate.getBottom(), false);
+    base.addColour(0.4, juce::Colour(0xff2b2e33));
+    g.setGradientFill(base);
+    g.fillRoundedRectangle(plate, corner);
+    {
+        juce::Graphics::ScopedSaveState state(g);
+        g.reduceClipRegion(plate.reduced(corner * 0.6f).getSmallestIntegerContainer());
+        const int tile = brushed_.getWidth();
+        for (int y = static_cast<int>(plate.getY()); y < static_cast<int>(plate.getBottom()); y += tile)
+            for (int x = static_cast<int>(plate.getX()); x < static_cast<int>(plate.getRight()); x += tile)
+                g.drawImageAt(brushed_, x, y);
+    }
+    g.addTransform(canvas);
+    paintStatic(g);
+}
+
+void PanelView::paintStatic(juce::Graphics& g) {
+    // The faceplate's edges (its surface is drawn in renderBackground).
+    const juce::Rectangle<float> plate = kPlate;
+    g.setColour(juce::Colours::white.withAlpha(0.10f));
+    g.drawRoundedRectangle(plate.reduced(1.5f), 15, 1.5f);
+    g.setColour(juce::Colours::black.withAlpha(0.7f));
+    g.drawRoundedRectangle(plate, 16, 2);
+    for (const juce::Point<float> corner : {plate.getTopLeft().translated(22, 22), plate.getTopRight().translated(-22, 22),
+                                            plate.getBottomLeft().translated(22, -22), plate.getBottomRight().translated(-22, -22)})
+        drawScrew(g, corner);
+
+    g.setFont(juce::FontOptions(40.0f, juce::Font::bold));
+    engrave(g, "SINOWI", juce::Rectangle<float>(70, 70, 420, 60), juce::Justification::centredLeft, kLabel);
+    paintHeadings(g);
+    paintModuleLines(g);
+
+    // Screen bezels, with the glass in the screens' unlit colour.
+    // The four small screens share one window, as on the hardware.
+    const juce::Colour glass = palette_[0];
+    const juce::Rectangle<float> smallScreens = kDisplays[1].getUnion(kDisplays[4]);
+    for (const juce::Rectangle<float>& bezel : {kDisplays[0].expanded(11), smallScreens.expanded(11)}) {
+        g.setColour(juce::Colours::black.withAlpha(0.55f));
+        g.fillRoundedRectangle(bezel.translated(0, 2.5f), 7);
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff17191c), 0, bezel.getY(), juce::Colour(0xff0b0c0e), 0, bezel.getBottom(), false));
+        g.fillRoundedRectangle(bezel, 7);
+        g.setColour(juce::Colours::white.withAlpha(0.08f));
+        g.drawRoundedRectangle(bezel.reduced(0.6f), 7, 1.0f);
+    }
+    for (const juce::Rectangle<float>& r : kDisplays) {
+        g.setColour(glass);
+        g.fillRect(r.expanded(4));
+        g.setColour(juce::Colours::black.withAlpha(0.8f));
+        g.drawRect(r.expanded(4), 1.2f);
+    }
+
+    // Buttons, with their printed labels and legends.
+    for (const Button& b : kButtons) {
+        const juce::Rectangle<float> r = buttonBounds(b);
+        drawButtonBody(g, r);
+        if (b.led >= 0) {
+            g.setColour(juce::Colour(0xff141518));
+            g.fillRoundedRectangle(ledSlot(r), 2);
+        }
+        g.setFont(juce::FontOptions(b.w < 72 && std::strlen(b.label) > 7 ? 10.0f : 12.0f));
+        g.setColour(juce::Colours::black.withAlpha(0.5f));
+        g.drawFittedText(b.label, r.reduced(3, 2).toNearestInt().withTrimmedBottom(5).translated(0, 1), juce::Justification::centred, 2);
         g.setColour(kLabel);
-        const juce::Rectangle<float> box = left ? juce::Rectangle<float>(end.x - 2 - 60, y - 7, 60, 14) : juce::Rectangle<float>(end.x + 2, y - 7, 60, 14);
-        g.drawText(legend, box, left ? juce::Justification::centredRight : juce::Justification::centredLeft);
+        g.drawFittedText(b.label, r.reduced(3, 2).toNearestInt().withTrimmedBottom(5), juce::Justification::centred, 2);
+        for (const Legend& legend : kShiftLegends)
+            if (legend.id == b.id) {
+                g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+                engrave(g, legend.text, juce::Rectangle<float>(r.getX() - 20, r.getBottom() + 4, r.getWidth() + 40, 14),
+                        juce::Justification::centred, kOrange);
+            }
+        if (b.id >= 33 && b.id <= 40) {  // the Control buttons' numbers
+            const int number = b.id - 32;
+            const float y = number <= 4 ? r.getBottom() + 4 : r.getY() - 18;
+            g.setFont(juce::FontOptions(12.0f));
+            engrave(g, juce::String(number), juce::Rectangle<float>(r.getX(), y, r.getWidth(), 14), juce::Justification::centred, kLabel);
+        }
+        if (b.id == 61) {  // DOWN: the pair is labelled PAGE
+            g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+            engrave(g, "PAGE", juce::Rectangle<float>(r.getX() - 10, r.getBottom() + 5, r.getWidth() + 20, 14), juce::Justification::centred, kLabel);
+        }
+    }
+
+    // Knob bodies, the arp switch legends and the names.
+    for (const Knob& k : kKnobs) {
+        const juce::Point<float> c(k.x, k.y);
+        drawMetalKnob(g, c, k.radius, false);
+        if (k.kind == Knob::Kind::Arp)
+            paintArpLegends(g, k);
+        if (k.kind == Knob::Kind::Volume) {
+            g.setFont(juce::FontOptions(12.0f));
+            engrave(g, k.label, juce::Rectangle<float>(140, 16).withCentre(c.translated(0, -k.radius - 16)), juce::Justification::centred, kLabel);
+        } else {
+            g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+            engrave(g, k.label, juce::Rectangle<float>(140, 16).withCentre(c.translated(0, k.radius + 18)), juce::Justification::centred, kLabel);
+        }
+    }
+
+    // Encoders: gunmetal knobs inside rings of LED holes; the patch knob.
+    for (int e = 0; e < hydra::FrontPanel::kEncoders; ++e) {
+        const juce::Point<float> c = encoderCentre(e);
+        for (int l = 0; l < hydra::FrontPanel::kRingLeds; ++l) {
+            const juce::Point<float> at = c.getPointOnCircumference(kEncoderRadius + 10, ringAngle(l));
+            g.setColour(juce::Colour(0xff121316));
+            g.fillEllipse(circle(at, 3.6f));
+            g.setColour(juce::Colours::white.withAlpha(0.06f));
+            g.drawEllipse(circle(at.translated(0, 0.6f), 3.6f), 0.8f);
+        }
+        drawMetalKnob(g, c, kEncoderRadius, true);
+    }
+    {
+        const juce::Point<float> c(kDataX, kDataY);
+        g.setColour(juce::Colour(0xff111215));
+        g.drawEllipse(circle(c, kDataRadius + 9), 11.0f);  // the ring's channel
+        drawMetalKnob(g, c, kDataRadius, true);
+        g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+        engrave(g, "PATCH", juce::Rectangle<float>(80, 16).withCentre(c), juce::Justification::centred, kLabel);
+    }
+
+    // Pad frames and their SHIFT legends.
+    for (int row = 0; row < hydra::FrontPanel::kPadRows; ++row)
+        for (int column = 0; column < hydra::FrontPanel::kPadColumns; ++column) {
+            const juce::Rectangle<float> r = padBounds(row, column);
+            g.setColour(juce::Colours::black.withAlpha(0.6f));
+            g.fillRoundedRectangle(r.expanded(4), 9);
+            g.setColour(juce::Colours::white.withAlpha(0.07f));
+            g.drawRoundedRectangle(r.expanded(4).translated(0, 1), 9, 1.0f);
+            const char* legend = kPadLegends[row][column];
+            if (!*legend)
+                continue;
+            const juce::Rectangle<float> label(r.getX() - 10, r.getBottom() + 6, r.getWidth() + 20, 14);
+            g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+            if (std::strcmp(legend, "KEY") == 0) {  // printed on an orange field
+                const juce::Rectangle<float> box = label.withSizeKeepingCentre(36, 14);
+                g.setColour(kOrange);
+                g.fillRoundedRectangle(box, 2);
+                g.setColour(juce::Colour(0xff1b1d21));
+                g.drawText(legend, box, juce::Justification::centred);
+            } else {
+                engrave(g, legend, label, juce::Justification::centred, kOrange);
+            }
+        }
+}
+
+void PanelView::paint(juce::Graphics& g) {
+    const float pixelScale = g.getInternalContext().getPhysicalPixelScaleFactor();
+    const bool sizeChanged = backgroundSize_ != getLocalBounds().getBottomRight() || backgroundScale_ != pixelScale;
+    // While the window is being resized the old background is stretched; it is
+    // drawn anew once the size has settled (see timerCallback).
+    if (!background_.isValid() || (sizeChanged && juce::Time::getMillisecondCounter() - resizedAt_ > kResizeSettleMs))
+        renderBackground(pixelScale);
+    g.setImageResamplingQuality(sizeChanged ? juce::Graphics::mediumResamplingQuality : juce::Graphics::lowResamplingQuality);
+    g.drawImage(background_, getLocalBounds().toFloat());
+
+    g.addTransform(juce::AffineTransform::scale(static_cast<float>(getWidth()) / kCanvasWidth,
+                                                static_cast<float>(getHeight()) / kCanvasHeight));
+    paintDisplays(g);
+    paintButtonStates(g);
+    paintKnobPointers(g);
+    paintEncoderLights(g);
+    paintPads(g);
+    if (!live_) {
+        g.setColour(kLabel);
+        g.setFont(juce::FontOptions(28.0f));
+        g.drawText("waiting for the emulator...", kDisplays[0].expanded(200, 0).translated(0, 100),
+                   juce::Justification::centred);
     }
 }
-}  // namespace
 
-void PanelView::paintKnobs(juce::Graphics& g) {
+void PanelView::paintDisplays(juce::Graphics& g) {
+    g.setImageResamplingQuality(juce::Graphics::lowResamplingQuality);
+    for (int d = 0; d < hydra::PanelDisplays::kCount; ++d) {
+        const juce::Rectangle<float> r = kDisplays[d];
+        if (!shows(g, r))
+            continue;
+        g.setOpacity(1.0f);
+        g.drawImage(displays_[static_cast<std::size_t>(d)], r, juce::RectanglePlacement::stretchToFit);
+        // The glass: a soft reflection over the top half.
+        const juce::Rectangle<float> glass = r.expanded(4);
+        g.setGradientFill(juce::ColourGradient(juce::Colours::white.withAlpha(0.07f), 0, glass.getY(), juce::Colours::transparentWhite, 0,
+                                               glass.getY() + glass.getHeight() * 0.55f, false));
+        g.fillRect(glass);
+    }
+}
+
+void PanelView::paintButtonStates(juce::Graphics& g) {
+    for (const Button& b : kButtons) {
+        const juce::Rectangle<float> r = buttonBounds(b);
+        if (!shows(g, r))
+            continue;
+        const bool held = (active_.kind == Target::Kind::Button && &kButtons[active_.index] == &b) ||
+                          (b.id == kShiftButton && (shiftLatched_ || shiftForGesture_ || shiftKeyHeld_));
+        if (held) {
+            g.setColour(juce::Colours::black.withAlpha(0.28f));
+            g.fillRoundedRectangle(r, 5);
+        }
+        if (b.led >= 0) {
+            const float level = lights_->buttons[static_cast<std::size_t>(b.led)];
+            if (level > 0.01f) {
+                const juce::Rectangle<float> slot = ledSlot(r);
+                g.setColour(kLed.withAlpha(0.18f * level));
+                g.fillRoundedRectangle(slot.expanded(3, 2), 4);
+                g.setColour(kLed.withAlpha(0.3f + 0.7f * level));
+                g.fillRoundedRectangle(slot, 2);
+            }
+        }
+    }
+}
+
+void PanelView::paintKnobPointers(juce::Graphics& g) {
     for (const Knob& k : kKnobs) {
+        const juce::Point<float> c(k.x, k.y);
+        const bool volume = k.kind == Knob::Kind::Volume;
+        if (!shows(g, circle(c, k.radius).withHeight(volume ? 2 * k.radius + 34 : 2 * k.radius)))
+            continue;
         float value = 0;
-        juce::String text;
         switch (k.kind) {
-        case Knob::Kind::Volume:
-            value = processor_.outputGain().convertTo0to1(processor_.outputGain().get());
-            text = juce::String(processor_.outputGain().get(), 1) + " dB";
-            break;
+        case Knob::Kind::Volume: value = processor_.outputGain().convertTo0to1(processor_.outputGain().get()); break;
         case Knob::Kind::Arp:
             // All four arp switches share one raster of eight detents over 270
             // degrees; OCTAVE uses the right four, DIVISION the left four.
@@ -430,96 +811,60 @@ void PanelView::paintKnobs(juce::Graphics& g) {
             break;
         case Knob::Kind::Analog: value = knobValues_[static_cast<std::size_t>(k.index)]; break;
         }
-        const juce::Point<float> c(k.x, k.y);
-        g.setColour(juce::Colour(0xff111215));
-        g.fillEllipse(juce::Rectangle<float>(k.radius * 2, k.radius * 2).withCentre(c));
-        g.setColour(juce::Colour(0xff50555e));
-        g.drawEllipse(juce::Rectangle<float>(k.radius * 2, k.radius * 2).withCentre(c), 2);
-        const float angle = juce::MathConstants<float>::pi * (-0.75f + 1.5f * value);
-        g.setColour(juce::Colours::white);
-        g.drawLine(juce::Line<float>(c, c.getPointOnCircumference(k.radius - 4, angle)), 3);
-        if (k.kind == Knob::Kind::Arp)
-            paintArpLegends(g, k);
-        g.setColour(kLabel);
-        g.setFont(juce::FontOptions(12.0f));
-        if (k.kind == Knob::Kind::Volume) {
-            g.drawText(k.label, juce::Rectangle<float>(140, 16).withCentre(c.translated(0, -k.radius - 14)),
-                       juce::Justification::centred);
-            g.drawText(text, juce::Rectangle<float>(140, 16).withCentre(c.translated(0, k.radius + 14)),
-                       juce::Justification::centred);
-        } else {  // as on the hardware: the name under the knob
-            g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-            g.drawText(k.label, juce::Rectangle<float>(140, 16).withCentre(c.translated(0, k.radius + 16)),
-                       juce::Justification::centred);
+        drawPointer(g, c, k.radius, juce::MathConstants<float>::pi * (-0.75f + 1.5f * value), kOrange);
+        if (volume) {
+            g.setFont(juce::FontOptions(12.0f));
+            engrave(g, juce::String(processor_.outputGain().get(), 1) + " dB",
+                    juce::Rectangle<float>(140, 16).withCentre(c.translated(0, k.radius + 16)), juce::Justification::centred, kLabel);
         }
     }
 }
 
-void PanelView::paintEncoders(juce::Graphics& g) {
-    const auto encoder = [&g](juce::Point<float> c, float radius) {
-        g.setColour(juce::Colour(0xff111215));
-        g.fillEllipse(juce::Rectangle<float>(radius * 2, radius * 2).withCentre(c));
-        g.setColour(juce::Colour(0xff5a5f68));
-        g.drawEllipse(juce::Rectangle<float>(radius * 2, radius * 2).withCentre(c), 2);
-    };
+void PanelView::paintEncoderLights(juce::Graphics& g) {
+    const juce::Colour lit(0xff6fd3ff);
     for (int e = 0; e < hydra::FrontPanel::kEncoders; ++e) {
         const juce::Point<float> c = encoderCentre(e);
-        encoder(c, kEncoderRadius);
-        // The ring: 15 LEDs over 270 degrees, from bottom left to bottom right.
+        if (!shows(g, circle(c, kEncoderRadius + 16)))
+            continue;
         for (int l = 0; l < hydra::FrontPanel::kRingLeds; ++l) {
-            const float angle = juce::MathConstants<float>::pi * (-0.75f + 1.5f * static_cast<float>(l) / 14.0f);
-            const bool lit = lights_->rings[static_cast<std::size_t>(e)][static_cast<std::size_t>(l)];
-            g.setColour(lit ? juce::Colour(0xff6fd3ff) : juce::Colour(0xff32363c));
-            g.fillEllipse(juce::Rectangle<float>(6, 6).withCentre(c.getPointOnCircumference(kEncoderRadius + 10, angle)));
+            if (!lights_->rings[static_cast<std::size_t>(e)][static_cast<std::size_t>(l)])
+                continue;
+            const juce::Point<float> at = c.getPointOnCircumference(kEncoderRadius + 10, ringAngle(l));
+            g.setColour(lit.withAlpha(0.22f));
+            g.fillEllipse(circle(at, 6.5f));
+            g.setColour(lit);
+            g.fillEllipse(circle(at, 3.2f));
         }
-        g.setColour(kLabel);
-        g.setFont(juce::FontOptions(12.0f));
-
     }
     // The patch knob's light ring, in the patch's colour.
-    {
-        const juce::Rectangle<float> ring = juce::Rectangle<float>(2 * (kDataRadius + 9), 2 * (kDataRadius + 9)).withCentre({kDataX, kDataY});
+    const juce::Point<float> c(kDataX, kDataY);
+    if (lights_->patchRing != 0 && shows(g, circle(c, kDataRadius + 22))) {
+        const juce::Rectangle<float> ring = circle(c, kDataRadius + 9);
         const juce::Colour colour = ledColour(lights_->patchRing, juce::Colour(0xff32363c));
-        if (lights_->patchRing != 0) {  // a soft glow outside the ring
-            g.setColour(colour.withAlpha(0.25f));
-            g.drawEllipse(ring.expanded(5), 6.0f);
-        }
+        g.setColour(colour.withAlpha(0.25f));
+        g.drawEllipse(ring.expanded(5), 6.0f);
         g.setColour(colour);
-        g.drawEllipse(ring, 9.0f);
+        g.drawEllipse(ring, 7.0f);
     }
-    encoder({kDataX, kDataY}, kDataRadius);
-    g.setColour(kLabel);
-    g.setFont(juce::FontOptions(12.0f));
-    g.drawText("PATCH", juce::Rectangle<float>(80, 16).withCentre({kDataX, kDataY}), juce::Justification::centred);
 }
-
 
 void PanelView::paintPads(juce::Graphics& g) {
     for (int row = 0; row < hydra::FrontPanel::kPadRows; ++row)
         for (int column = 0; column < hydra::FrontPanel::kPadColumns; ++column) {
             const juce::Rectangle<float> r = padBounds(row, column);
+            if (!shows(g, r))
+                continue;
             const std::uint32_t rgb = lights_->pads[static_cast<std::size_t>(row * hydra::FrontPanel::kPadColumns + column)];
             g.setColour(ledColour(rgb, juce::Colour(0xff2e3238)));
             g.fillRoundedRectangle(r, 6);
+            // Soft silicone: lighter towards the top.
+            g.setGradientFill(juce::ColourGradient(juce::Colours::white.withAlpha(0.10f), 0, r.getY(), juce::Colours::transparentWhite, 0,
+                                                   r.getCentreY(), false));
+            g.fillRoundedRectangle(r, 6);
             const bool held = active_.kind == Target::Kind::Pad &&
                               active_.index == row * hydra::FrontPanel::kPadColumns + column;
-            g.setColour(held ? juce::Colours::white : juce::Colour(0xff4a4f58));
-            g.drawRoundedRectangle(r, 6, held ? 3.0f : 1.5f);
-            const char* legend = kPadLegends[row][column];
-            if (*legend) {
-                const juce::Rectangle<float> label(r.getX() - 10, r.getBottom() + 3, r.getWidth() + 20, 14);
-                g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-                if (std::strcmp(legend, "KEY") == 0) {  // printed on an orange field
-                    const juce::Rectangle<float> box = label.withSizeKeepingCentre(36, 14);
-                    g.setColour(kOrange);
-                    g.fillRoundedRectangle(box, 2);
-                    g.setColour(juce::Colour(0xff1b1d21));
-                    g.drawText(legend, box, juce::Justification::centred);
-                } else {
-                    g.setColour(kOrange);
-                    g.drawText(legend, label, juce::Justification::centred);
-                }
-            }
+            g.setColour(held ? juce::Colours::white : juce::Colours::black.withAlpha(0.5f));
+            g.drawRoundedRectangle(r, 6, held ? 3.0f : 1.2f);
         }
 }
 
@@ -588,6 +933,15 @@ void PanelView::turn(const Target& target, int detents) {
 }
 
 void PanelView::mouseDown(const juce::MouseEvent& e) {
+    if (e.mods.isPopupMenu()) {  // right-click (or ctrl-click) on a screen: next screen colour
+        const juce::Point<float> p = toCanvas(e.position);
+        for (const juce::Rectangle<float>& r : kDisplays)
+            if (r.expanded(11).contains(p)) {
+                active_ = {};
+                cycleScreenTint();
+                return;
+            }
+    }
     active_ = targetAt(toCanvas(e.position));
     dragStartY_ = e.position.y;
     dragAccumulator_ = 0;
