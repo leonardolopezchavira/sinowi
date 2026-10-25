@@ -73,6 +73,14 @@ public:
     void selectPatch(int bank, int slot);
     // The emulated front panel (no-ops while no emulator runs).
     void panelInput(const hydra::Emulator::PanelInput& input);
+    // Panel buttons held from more than one place: the editor's mouse (and the
+    // computer's Shift key for SHIFT), keys of the computer keyboard (R for
+    // RANDOM, see PanelView) and MIDI CCs (see kButtonCcs). The instrument sees a
+    // button down while any source holds it, so the sources do not fight.
+    enum ButtonSource : std::uint8_t { kFromPanel = 1, kFromMidi = 2, kFromKeyboard = 4 };
+    void holdButton(int id, ButtonSource source, bool down, int delayMs = 0);
+    // Whether any of the `sources` (ButtonSource bits) holds the button.
+    bool buttonHeldBy(int id, std::uint8_t sources) const;
     bool readPanel(hydra::FrontPanel::Lights& out, std::uint64_t& generation) const;
     // The last value of each MIDI CC sent to the instrument (from the MIDI input
     // or the host parameters, after scaleController; -1 = none yet). Returns false if nothing changed
@@ -117,6 +125,14 @@ private:
     std::array<std::atomic<int>, 128> lastCc_{};
     std::atomic<std::uint32_t> ccSerial_{0};
     void noteController(int number, int value);
+    // Which sources hold each panel button (ButtonSource bits).
+    std::array<std::atomic<std::uint8_t>, hydra::FrontPanel::kButtons> buttonSources_{};
+    // Updates the sources of a button; returns +1 if it went down, -1 if it went
+    // up for the instrument (no source left), 0 if that did not change.
+    int updateButtonSources(int id, ButtonSource source, bool down);
+    // A MIDI CC mapped to a panel button: handled here, not passed to the
+    // instrument. Returns false if `number` is not such a CC.
+    bool buttonController(hydra::Emulator& emulator, int number, int value);
     static int scaleController(int number, int value);
     std::atomic<bool> restoringState_{false};
 

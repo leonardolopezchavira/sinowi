@@ -6,10 +6,25 @@
 #include <tuple>
 
 #include "HydraProcessor.h"
+#include "KeyState.h"
 
 namespace {
 using Input = hydra::Emulator::PanelInput;
 constexpr int kShiftButton = 62;
+
+// Panel buttons held with a key of the computer keyboard while the mouse is over
+// the panel (SHIFT has the Shift key, see followShiftKey). The macOS virtual key
+// code, and the character for JUCE's key state elsewhere.
+struct KeyButton {
+    int macKeyCode;
+    juce::juce_wchar character;
+    int button;
+};
+constexpr KeyButton kKeyButtons[] = {
+    {0x0F, 'r', 59},  // R: RANDOM (kVK_ANSI_R)
+};
+// Buttons also held from outside the panel (keys, MIDI CCs): drawn pressed then.
+constexpr int kMappedButtons[] = {kShiftButton, 59};
 // A button pressed together with SHIFT goes down this much after SHIFT, and
 // SHIFT is let go this much after the button: the firmware scans the buttons
 // every 5 ms and must see SHIFT held when the other button arrives.
@@ -141,6 +156,21 @@ PanelView::PanelView(HydraProcessor& processor)
 
 PanelView::~PanelView() = default;
 
+void PanelView::followKeys() {
+    const juce::ModifierKeys mods = juce::ModifierKeys::getCurrentModifiersRealtime();
+    const bool overPanel = isMouseOver(true);
+    for (std::size_t i = 0; i < std::size(kKeyButtons); ++i) {
+        const KeyButton& k = kKeyButtons[i];
+        // Not with Command, Control or Option (shortcuts such as Command-R).
+        const bool down = overPanel && !mods.isCommandDown() && !mods.isCtrlDown() && !mods.isAltDown() &&
+                          (isMacKeyDown(k.macKeyCode) || juce::KeyPress::isKeyCurrentlyDown(k.character));
+        if (down == keysHeld_[i])
+            continue;
+        keysHeld_[i] = down;
+        processor_.holdButton(k.button, HydraProcessor::kFromKeyboard, down);
+    }
+}
+
 void PanelView::followShiftKey() {
     const bool down = isMouseOver(true) && juce::ModifierKeys::getCurrentModifiersRealtime().isShiftDown();
     if (down == shiftKeyHeld_)
@@ -202,6 +232,18 @@ void PanelView::followControllers() {
 
 void PanelView::timerCallback() {
     followShiftKey();
+    followKeys();
+    // Buttons held by a key or a MIDI CC: show them pressed.
+    for (const int id : kMappedButtons) {
+        const bool held = processor_.buttonHeldBy(id, HydraProcessor::kFromMidi | HydraProcessor::kFromKeyboard);
+        if (held == heldElsewhere_[static_cast<std::size_t>(id)])
+            continue;
+        heldElsewhere_[static_cast<std::size_t>(id)] = held;
+        for (const Button& b : kButtons)
+            if (b.id == id)
+                repaint(buttonBounds(b).expanded(4).transformedBy(juce::AffineTransform::scale(
+                    static_cast<float>(getWidth()) / kCanvasWidth, static_cast<float>(getHeight()) / kCanvasHeight)).getSmallestIntegerContainer());
+    }
     followControllers();
     // After a resize, draw the background anew once the size has settled.
     if (background_.isValid() && backgroundSize_ != getLocalBounds().getBottomRight() &&
@@ -777,7 +819,8 @@ void PanelView::paintButtonStates(juce::Graphics& g) {
         if (!shows(g, r))
             continue;
         const bool held = (active_.kind == Target::Kind::Button && &kButtons[active_.index] == &b) ||
-                          (b.id == kShiftButton && (shiftLatched_ || shiftForGesture_ || shiftKeyHeld_));
+                          (b.id == kShiftButton && (shiftLatched_ || shiftForGesture_ || shiftKeyHeld_)) ||
+                          heldElsewhere_[static_cast<std::size_t>(b.id)];
         if (held) {
             g.setColour(juce::Colours::black.withAlpha(0.28f));
             g.fillRoundedRectangle(r, 5);
@@ -964,7 +1007,7 @@ void PanelView::mouseDown(const juce::MouseEvent& e) {
             shiftForGesture_ = true;
             delay = kShiftLeadMs;
         }
-        processor_.panelInput({Input::Kind::Button, id, 1, 0, delay});
+        processor_.holdButton(id, HydraProcessor::kFromPanel, true, delay);
         break;
     }
     case Target::Kind::Encoder:
@@ -1020,7 +1063,7 @@ void PanelView::mouseUp(const juce::MouseEvent&) {
         if (id == kShiftButton)
             break;  // latched or released by the click itself
         const int delay = shiftForGesture_ || shiftKeyHeld_ ? kShiftLeadMs : 0;
-        processor_.panelInput({Input::Kind::Button, id, 0, 0, delay});
+        processor_.holdButton(id, HydraProcessor::kFromPanel, false, delay);
         if (shiftLatched_ || shiftForGesture_) {
             releaseShift(delay + kShiftTrailMs);
             shiftLatched_ = shiftForGesture_ = false;
@@ -1041,9 +1084,11 @@ void PanelView::mouseUp(const juce::MouseEvent&) {
     repaint();
 }
 
-void PanelView::pressShift() { processor_.panelInput({Input::Kind::Button, kShiftButton, 1, 0, 0}); }
+// SHIFT from the panel (a click, the computer's Shift key) is one source; a MIDI
+// CC can hold it too (HydraProcessor::holdButton combines them).
+void PanelView::pressShift() { processor_.holdButton(kShiftButton, HydraProcessor::kFromPanel, true); }
 
-void PanelView::releaseShift(int delayMs) { processor_.panelInput({Input::Kind::Button, kShiftButton, 0, 0, delayMs}); }
+void PanelView::releaseShift(int delayMs) { processor_.holdButton(kShiftButton, HydraProcessor::kFromPanel, false, delayMs); }
 
 void PanelView::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) {
     // A wheel notch (0.1-0.25 per notch, depending on the platform) is one detent.

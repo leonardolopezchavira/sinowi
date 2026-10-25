@@ -46,6 +46,20 @@ HydraProcessor::HydraProcessor()
         cc.store(-1, std::memory_order_relaxed);
 }
 
+// Panel buttons played from MIDI CCs (any channel): value >= 64 holds the button,
+// < 64 lets it go, as a controller's momentary button sends 127 and 0. Only CCs
+// the Hydrasynth's MIDI chart leaves free are used: of 0-127 that is just 2
+// (breath) and 4 (foot); 6, 38 and 98-101 carry NRPNs and 121-127 are channel
+// mode messages. These CCs are not passed to the instrument (a patch using one
+// as a mod matrix source would not see it).
+struct ButtonCc {
+    int cc, button;
+};
+constexpr ButtonCc kButtonCcs[] = {
+    {4, 62},  // SHIFT
+    {2, 59},  // RANDOM
+};
+
 // The firmware takes some arpeggiator CCs as the parameter's own value (a list
 // index, a percentage) and ignores values outside its range, so a controller's
 // 0-127 sweep would mostly do nothing. Those CCs are scaled onto the range the
@@ -67,6 +81,40 @@ int HydraProcessor::scaleController(int number, int value) {
         if (r.cc == number)
             return r.low + (value * (r.high - r.low) + 63) / 127;
     return value;
+}
+
+int HydraProcessor::updateButtonSources(int id, ButtonSource source, bool down) {
+    if (id < 0 || id >= hydra::FrontPanel::kButtons)
+        return 0;
+    auto& sources = buttonSources_[static_cast<std::size_t>(id)];
+    if (down)
+        return sources.fetch_or(source, std::memory_order_acq_rel) == 0 ? 1 : 0;
+    const std::uint8_t before = sources.fetch_and(static_cast<std::uint8_t>(~source), std::memory_order_acq_rel);
+    return before == source ? -1 : 0;  // this source was the last one holding it
+}
+
+void HydraProcessor::holdButton(int id, ButtonSource source, bool down, int delayMs) {
+    const int change = updateButtonSources(id, source, down);
+    if (change != 0)
+        panelInput({hydra::Emulator::PanelInput::Kind::Button, id, change > 0 ? 1 : 0, 0, delayMs});
+}
+
+bool HydraProcessor::buttonHeldBy(int id, std::uint8_t sources) const {
+    return id >= 0 && id < hydra::FrontPanel::kButtons &&
+           (buttonSources_[static_cast<std::size_t>(id)].load(std::memory_order_acquire) & sources) != 0;
+}
+
+bool HydraProcessor::buttonController(hydra::Emulator& emulator, int number, int value) {
+    for (const ButtonCc& mapping : kButtonCcs)
+        if (mapping.cc == number) {
+            // On the audio thread: only a change of the button's state reaches
+            // the emulator (a short queue append), repeats of the same value do not.
+            const int change = updateButtonSources(mapping.button, kFromMidi, value >= 64);
+            if (change != 0)
+                emulator.panelInput({hydra::Emulator::PanelInput::Kind::Button, mapping.button, change > 0 ? 1 : 0, 0, 0});
+            return true;
+        }
+    return false;
 }
 
 void HydraProcessor::noteController(int number, int value) {
@@ -365,6 +413,8 @@ void HydraProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         const juce::MidiMessage message = metadata.getMessage();
         if (message.isController()) {
             const int number = message.getControllerNumber();
+            if (buttonController(emulator, number, message.getControllerValue()))
+                continue;
             const int value = scaleController(number, message.getControllerValue());
             const std::uint8_t cc[3] = {message.getRawData()[0], static_cast<std::uint8_t>(number), static_cast<std::uint8_t>(value)};
             emulator.sendMidi(cc, 3);

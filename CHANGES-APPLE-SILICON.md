@@ -30,6 +30,9 @@ https://github.com/systemfreund/sydrahynth), renamed and modified:
   - Arpeggiator CCs (106-110, 120, 122) are scaled from 0-127 onto the values the
     firmware accepts (it ignores out-of-range values).
   - The filter knobs and arp switches on the panel follow incoming MIDI CCs.
+  - SHIFT and RANDOM can be held from MIDI CCs 4 and 2 (the only CCs the
+    Hydrasynth chart leaves free) and from the computer's Shift and R keys;
+    see `docs/MIDI-CC.md`.
   - New panel look (brushed faceplate, metal knobs, screen colours: right-click a
     screen); static parts are drawn once into a cached image.
 

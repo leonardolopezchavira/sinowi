@@ -83,12 +83,16 @@ this project is not affiliated with or endorsed by ASM.
   for the first time (its translation by the JIT takes a  few milliseconds), e.g.
   the first note after a patch was sent.
 - Host parameters: the instrument's 111 MIDI CCs and an output gain.
+- MIDI CCs: see [docs/MIDI-CC.md](docs/MIDI-CC.md) for the full CC chart, the CCs
+  and keys that hold SHIFT (CC 4, Shift) and RANDOM (CC 2, R), and how the
+  arpeggiator CCs are scaled.
 - The plugin state holds those parameters and the instrument's flash user
   area (settings and banks), so stored patches survive saving a project.
 - Panel view: the emulated displays and lights are captured every 10 ms of
   emulated time and drawn at 60 Hz; only what changed is repainted. SHIFT
   latches on a click and applies to the next button, or is released by another
-  click; the computer's Shift key, while the mouse is over the panel, holds SHIFT.
+  click; the computer's Shift key, while the mouse is over the panel, holds SHIFT,
+  and the R key holds RANDOM.
 - Patches: the editor's patch browser (shown or hidden with "Patches" in the
   top bar; the window grows or shrinks by its width) lists the five banks (A-E, 128 slots
   each) as the instrument stores them, marks the current patch and follows

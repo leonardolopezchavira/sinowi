@@ -83,6 +83,11 @@ private:
     float wheelAccumulator_ = 0;
     bool shiftLatched_ = false, shiftForGesture_ = false;
     bool shiftKeyHeld_ = false;  // the computer's Shift key, held while the mouse is over the panel
+    // Keys of the computer keyboard that hold panel buttons (kKeyButtons), and
+    // which buttons a key or MIDI CC holds (drawn pressed).
+    void followKeys();
+    std::array<bool, 4> keysHeld_{};
+    std::array<bool, hydra::FrontPanel::kButtons> heldElsewhere_{};
     void followShiftKey();
     std::array<float, hydra::FrontPanel::kKnobs> knobValues_{0.5f, 0.5f, 0.5f};  // cutoff, resonance, drive/morph
     // The filter knobs follow incoming MIDI CCs for the filter they control.

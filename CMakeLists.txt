@@ -119,7 +119,8 @@ if (HYDRA_BUILD_PLUGIN AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/external/JUCE/CMak
         plugin/HydraProcessor.cpp
         plugin/HydraEditor.cpp
         plugin/PanelView.cpp
-        plugin/PatchBrowser.cpp)
+        plugin/PatchBrowser.cpp
+        plugin/KeyState.cpp)
     target_include_directories(Sinowi PRIVATE plugin)
     target_compile_definitions(Sinowi PUBLIC
         JUCE_WEB_BROWSER=0
