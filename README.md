@@ -10,7 +10,7 @@ Linux plugin by systemfreund, ported to Apple Silicon with further changes; see
 `CHANGES-APPLE-SILICON.md`. It keeps Sydrahynth's plugin IDs, so projects saved
 with Sydrahynth open with Sinowi.
 
-
+![The Sinowi standalone app on macOS](docs/sinowi-standalone.jpg)
 
 
 
