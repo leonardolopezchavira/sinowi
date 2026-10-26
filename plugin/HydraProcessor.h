@@ -63,6 +63,13 @@ public:
     int screenTint() const;
     void setScreenTint(int tint);
     juce::AudioParameterFloat& outputGain() { return *outputGain_; }
+    // Saves or restores the whole state (what a host or the standalone's
+    // "Save current state" stores: all banks, the system settings and the CC
+    // parameters) as a file. Each returns an error message, or an empty string.
+    juce::String saveStateFile(const juce::File& file);
+    juce::String loadStateFile(const juce::File& file);
+    // The folder last used for state files (a global setting).
+    juce::File stateFolder() const;
     // Sends the patches of a .hydra bank (or a single .patch) to a bank (0 = A
     // ... 7 = H) of the instrument over its MIDI input. Returns an error message,
     // or an empty string once the upload is under way (see statusText()).

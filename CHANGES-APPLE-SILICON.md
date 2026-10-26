@@ -37,6 +37,8 @@ https://github.com/systemfreund/sydrahynth), renamed and modified:
     "Load bank..." and patch selection, instead of A-E.
   - Blank slots of banks A-E show and play as Init at boot, as the firmware
     already does for banks F-H (the firmware's own Init patch, in RAM only).
+  - "Save state..." and "Load state..." buttons in the top bar save and load the
+    whole state as a file, interchangeable between the standalone app and the plugin.
   - New panel look (brushed faceplate, metal knobs, screen colours: right-click a
     screen); static parts are drawn once into a cached image.
 

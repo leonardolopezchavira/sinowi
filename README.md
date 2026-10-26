@@ -105,6 +105,11 @@ this project is not affiliated with or endorsed by ASM.
   send a bank or patch as SysEx (e.g. from a librarian). Slots holding no patch
   show and play as Init in every bank (the firmware does this for F-H; Sinowi
   for A-E).
+- States: "Save state..." and "Load state..." in the top bar write and read the
+  whole instrument (all eight banks, the system settings and the CC
+  parameters) as a file, in the standalone app and in the plugin alike. The
+  format is the one the standalone app's "Save current state" uses, so a state
+  saved in the standalone app loads into a plugin in a DAW, and the reverse.
 - The editor shows the instrument's front panel, driven by the emulated
   hardware: the five displays, button LEDs, encoder rings and pad colours.
   Click buttons and pads; drag or scroll encoders, the data encoder and knobs

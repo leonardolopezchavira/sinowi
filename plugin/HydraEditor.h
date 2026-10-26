@@ -40,13 +40,16 @@ private:
 
     void timerCallback() override;
     void chooseFirmware();
+    void saveState();
+    void loadState();
     // Shows or hides the patch browser; the window grows or shrinks by its width.
     void showBrowser(bool visible, bool resizeWindow);
     void updateResizeLimits();
 
     HydraProcessor& processor_;
     juce::Label title_, firmware_, status_;
-    juce::TextButton chooseFirmware_{"Firmware..."}, togglePatches_{"Patches"};
+    juce::TextButton chooseFirmware_{"Firmware..."}, togglePatches_{"Patches"},
+        saveState_{"Save state..."}, loadState_{"Load state..."};
     juce::ComboBox latency_;
     std::unique_ptr<juce::FileChooser> chooser_;
     PatchBrowser browser_;

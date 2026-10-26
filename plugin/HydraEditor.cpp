@@ -23,6 +23,12 @@ HydraEditor::HydraEditor(HydraProcessor& owner) : AudioProcessorEditor(owner), p
     togglePatches_.setTooltip("Show or hide the patch browser");
     togglePatches_.onClick = [this] { showBrowser(togglePatches_.getToggleState(), true); };
     addAndMakeVisible(togglePatches_);
+    saveState_.setTooltip("Save all banks and settings to a file (the same format as the standalone's \"Save current state\")");
+    saveState_.onClick = [this] { saveState(); };
+    addAndMakeVisible(saveState_);
+    loadState_.setTooltip("Load all banks and settings from a saved state file");
+    loadState_.onClick = [this] { loadState(); };
+    addAndMakeVisible(loadState_);
     addChildComponent(browser_);
     addAndMakeVisible(panel_);
     // The panel keeps its proportions; the status bar and the browser have fixed sizes.
@@ -101,14 +107,18 @@ void HydraEditor::paint(juce::Graphics& g) { g.fillAll(juce::Colour(0xff1e2126))
 void HydraEditor::resized() {
     auto area = getLocalBounds();
     auto bar = area.removeFromTop(kBarHeight).reduced(8, 4);
-    title_.setBounds(bar.removeFromLeft(130));
+    title_.setBounds(bar.removeFromLeft(110));
     togglePatches_.setBounds(bar.removeFromLeft(80));
+    bar.removeFromLeft(8);
+    saveState_.setBounds(bar.removeFromLeft(100));
+    bar.removeFromLeft(4);
+    loadState_.setBounds(bar.removeFromLeft(100));
     bar.removeFromLeft(12);
     chooseFirmware_.setBounds(bar.removeFromRight(100));
     bar.removeFromRight(8);
     latency_.setBounds(bar.removeFromRight(140));
     bar.removeFromRight(8);
-    status_.setBounds(bar.removeFromRight(300));
+    status_.setBounds(bar.removeFromRight(std::min(300, std::max(0, bar.getWidth()))));
     firmware_.setBounds(bar);
     if (browser_.isVisible())
         browser_.setBounds(area.removeFromLeft(kBrowserWidth));
@@ -134,5 +144,41 @@ void HydraEditor::chooseFirmware() {
                               const juce::File file = chooser.getResult();
                               if (file.existsAsFile())
                                   processor_.setFirmwareFile(file);
+                          });
+}
+
+void HydraEditor::saveState() {
+    const juce::File start = processor_.stateFolder().getChildFile("Sinowi state.sinowi");
+    chooser_ = std::make_unique<juce::FileChooser>("Save Sinowi state", start, "*.sinowi");
+    chooser_->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles |
+                              juce::FileBrowserComponent::warnAboutOverwriting,
+                          [this](const juce::FileChooser& chooser) {
+                              const juce::File file = chooser.getResult();
+                              if (file == juce::File())
+                                  return;
+                              if (const juce::String error = processor_.saveStateFile(file); error.isNotEmpty())
+                                  juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Save state", error, {}, this);
+                          });
+}
+
+void HydraEditor::loadState() {
+    // Any file: states saved by the standalone app's menu may have another extension.
+    chooser_ = std::make_unique<juce::FileChooser>("Load Sinowi state", processor_.stateFolder(), "*");
+    chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                          [this](const juce::FileChooser& chooser) {
+                              const juce::File file = chooser.getResult();
+                              if (!file.existsAsFile())
+                                  return;
+                              const auto options = juce::MessageBoxOptions::makeOptionsOkCancel(
+                                  juce::MessageBoxIconType::QuestionIcon, "Load state",
+                                  "Load " + file.getFileName() + "?\n\nThis replaces all eight banks and the settings of this Sinowi "
+                                  "with the ones in the file. Save the current state first if you want to keep it.",
+                                  "Load", "Cancel", this);
+                              juce::AlertWindow::showAsync(options, [safe = juce::Component::SafePointer<HydraEditor>(this), file](int result) {
+                                  if (result != 1 || safe == nullptr)
+                                      return;
+                                  if (const juce::String error = safe->processor_.loadStateFile(file); error.isNotEmpty())
+                                      juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Load state", error, {}, safe.getComponent());
+                              });
                           });
 }

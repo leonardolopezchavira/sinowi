@@ -372,6 +372,43 @@ void HydraProcessor::setScreenTint(int tint) {
     settings_.saveIfNeeded();
 }
 
+juce::File HydraProcessor::stateFolder() const {
+    auto& self = const_cast<HydraProcessor&>(*this);
+    const juce::File stored(self.settings_.getUserSettings()->getValue("stateFolder"));
+    return stored.isDirectory() ? stored : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+}
+
+juce::String HydraProcessor::saveStateFile(const juce::File& file) {
+    juce::MemoryBlock data;
+    getStateInformation(data);
+    if (data.isEmpty())
+        return "There is no state to save yet.";
+    if (!file.replaceWithData(data.getData(), data.getSize()))
+        return "Cannot write " + file.getFullPathName();
+    const std::lock_guard life(lifeMutex_);
+    settings_.getUserSettings()->setValue("stateFolder", file.getParentDirectory().getFullPathName());
+    settings_.saveIfNeeded();
+    return {};
+}
+
+juce::String HydraProcessor::loadStateFile(const juce::File& file) {
+    juce::MemoryBlock data;
+    if (!file.loadFileAsData(data))
+        return "Cannot read " + file.getFullPathName();
+    const auto xml = getXmlFromBinary(data.getData(), static_cast<int>(data.getSize()));
+    if (!xml || (!xml->hasTagName("Sinowi") && !xml->hasTagName("Sydrahynth")))
+        return file.getFileName() + " is not a Sinowi state file.";
+    setStateInformation(data.getData(), static_cast<int>(data.getSize()));
+    // The project now differs from what the host saved: let it know.
+    updateHostDisplay(ChangeDetails().withNonParameterStateChanged(true));
+    {
+        const std::lock_guard life(lifeMutex_);
+        settings_.getUserSettings()->setValue("stateFolder", file.getParentDirectory().getFullPathName());
+        settings_.saveIfNeeded();
+    }
+    return {};
+}
+
 void HydraProcessor::setLatencyChoice(int choice) {
     {
         const std::lock_guard life(lifeMutex_);
