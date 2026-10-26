@@ -33,6 +33,10 @@ https://github.com/systemfreund/sydrahynth), renamed and modified:
   - SHIFT and RANDOM can be held from MIDI CCs 4 and 2 (the only CCs the
     Hydrasynth chart leaves free) and from the computer's Shift and R keys;
     see `docs/MIDI-CC.md`.
+  - All eight banks of firmware 2.x (A-H, 1024 patches) in the patch browser,
+    "Load bank..." and patch selection, instead of A-E.
+  - Blank slots of banks A-E show and play as Init at boot, as the firmware
+    already does for banks F-H (the firmware's own Init patch, in RAM only).
   - New panel look (brushed faceplate, metal knobs, screen colours: right-click a
     screen); static parts are drawn once into a cached image.
 

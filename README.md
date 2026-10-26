@@ -94,7 +94,7 @@ this project is not affiliated with or endorsed by ASM.
   click; the computer's Shift key, while the mouse is over the panel, holds SHIFT,
   and the R key holds RANDOM.
 - Patches: the editor's patch browser (shown or hidden with "Patches" in the
-  top bar; the window grows or shrinks by its width) lists the five banks (A-E, 128 slots
+  top bar; the window grows or shrinks by its width) lists the eight banks (A-H, 128 slots
   each) as the instrument stores them, marks the current patch and follows
   changes made on the panel; clicking a slot selects it (bank select LSB and a
   program change on the MIDI input; reception is switched on for a fresh
@@ -102,7 +102,9 @@ this project is not affiliated with or endorsed by ASM.
   shown bank. The patches live in the instrument's flash, which the plugin state
   saves and restores, as does the standalone app after quitting. The firmware
   file holds no factory patches; get the banks from ASM as `.hydra` files. Or
-  send a bank or patch as SysEx (e.g. from a librarian).
+  send a bank or patch as SysEx (e.g. from a librarian). Slots holding no patch
+  show and play as Init in every bank (the firmware does this for F-H; Sinowi
+  for A-E).
 - The editor shows the instrument's front panel, driven by the emulated
   hardware: the five displays, button LEDs, encoder rings and pad colours.
   Click buttons and pads; drag or scroll encoders, the data encoder and knobs

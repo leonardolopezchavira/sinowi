@@ -10,7 +10,7 @@
 
 class HydraProcessor;
 
-// The instrument's patches: one bank at a time (A-E) as a list of its 128
+// The instrument's patches: one bank at a time (A-H) as a list of its 128
 // slots, read from the emulated instrument, with the current patch marked.
 // Choosing a slot selects it on the instrument (program change); the browser
 // follows patch changes made on the panel. "Load bank..." sends a .hydra bank

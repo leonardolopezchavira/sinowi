@@ -45,9 +45,12 @@ void PatchBrowser::resized() {
     current_.setBounds(area.removeFromTop(24));
     area.removeFromTop(4);
     auto banks = area.removeFromTop(26);
-    const int width = banks.getWidth() / Patches::kBanks;
-    for (auto& button : bankButtons_)
-        button.setBounds(banks.removeFromLeft(width));
+    // The bank tabs share the width evenly (the remainder spread over them).
+    const int left = banks.getX(), total = banks.getWidth();
+    for (int b = 0; b < Patches::kBanks; ++b) {
+        const int x0 = left + total * b / Patches::kBanks, x1 = left + total * (b + 1) / Patches::kBanks;
+        bankButtons_[static_cast<std::size_t>(b)].setBounds(x0, banks.getY(), x1 - x0, banks.getHeight());
+    }
     area.removeFromTop(6);
     loadBank_.setBounds(area.removeFromBottom(26));
     area.removeFromBottom(6);

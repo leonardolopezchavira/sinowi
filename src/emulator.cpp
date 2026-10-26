@@ -31,8 +31,8 @@ void traceBoot(const char* phase, std::uint64_t ticks) {
 // Pauses after each patch upload message, in emulated milliseconds.
 constexpr std::uint64_t kUploadChunkGapMs = 10, kUploadControlGapMs = 60;
 
-// Firmware 2.2.0's bank cache in DRAM (all 640 slots as 2786-byte 2.x bodies,
-// filled from flash at boot) and its current patch (the same layout; zeros
+// Firmware 2.2.0's bank cache in DRAM (all 1024 slots, banks A-H, as 2786-byte
+// 2.x bodies, filled from flash at boot: A-E from one area, F-H from another) and its current patch (the same layout; zeros
 // while no patch is loaded, as after selecting a blank slot). A body starts with
 // the version (u16), the slot index bank * 128 + slot (u16), the category and
 // the 16-character name. See docs/hardware.md, "Patches and SysEx".
@@ -339,6 +339,49 @@ void Emulator::capturePanel() {
     ++lightsGeneration_;
 }
 
+// Firmware 2.x fills blank slots of banks F-H with an Init patch when it loads
+// its bank cache at boot (in RAM; the flash stays blank until a patch is stored
+// there), but leaves blank slots of banks A-E blank: no name, and a silent sound
+// when selected. Blank A-E slots get the same Init patch here: the firmware's
+// own, taken from two F-H slots that are identical apart from their index, with
+// the slot's index set. Like F-H, only the cache changes: storing or uploading a
+// patch into such a slot writes it to flash as usual, and a slot left as Init
+// stays blank in flash (and in saved states), to be filled again at the next boot.
+void Emulator::fillBlankSlots() {
+    constexpr int kFirstBankF = 5 * Patches::kSlots, kSlotCount = Patches::kBanks * Patches::kSlots;
+    std::uint8_t* cache = machine_->memory().hostPtr(kBankCache, kPatchBytes * kSlotCount);
+    if (!cache)
+        return;
+    const auto body = [cache](int i) { return cache + static_cast<std::size_t>(i) * kPatchBytes; };
+    // The same body apart from the slot index (bytes 2-3).
+    const auto sameExceptIndex = [&](int a, int b) {
+        return std::memcmp(body(a), body(b), 2) == 0 && std::memcmp(body(a) + 4, body(b) + 4, kPatchBytes - 4) == 0;
+    };
+    int init = -1;
+    for (int i = kFirstBankF; i < kSlotCount && init < 0; ++i) {
+        if (patchName(body(i)) != "Init")
+            continue;
+        for (int j = i + 1; j < kSlotCount; ++j)
+            if (sameExceptIndex(i, j)) {
+                init = i;
+                break;
+            }
+    }
+    if (init < 0)
+        return;  // no firmware Init in F-H to copy (every slot there holds a patch)
+    int filled = 0;
+    for (int i = 0; i < kFirstBankF; ++i) {
+        std::uint8_t* b = body(i);
+        if (b[2] != 0xFF || b[3] != 0xFF || b[5] != 0xFF)
+            continue;  // not blank: index and name are erased in a blank slot
+        std::memcpy(b, body(init), kPatchBytes);
+        b[2] = static_cast<std::uint8_t>(i & 0xFF);
+        b[3] = static_cast<std::uint8_t>(i >> 8);
+        ++filled;
+    }
+    traceBoot(std::format("{} blank slots of banks A-E filled with Init", filled).c_str(), machine_->cpu().ticksExecuted());
+}
+
 void Emulator::capturePatches() {
     const std::uint64_t now = machine_->cpu().ticksExecuted();
     if (now < nextPatchesTick_)
@@ -419,6 +462,7 @@ void Emulator::advanceBoot() {
     case WarmUp::Done:
         break;
     }
+    fillBlankSlots();
     {
         const std::lock_guard lock(statusMutex_);
         status_ = "running";

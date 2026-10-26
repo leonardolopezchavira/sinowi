@@ -73,7 +73,7 @@ public:
     // as of the next pause between run chunks. Waits up to `timeoutMs`.
     std::vector<Machine::Config::FlashBlock> captureFlash(int timeoutMs = 2000);
 
-    // Sends patches to a bank (0 = A ... 4 = E) over the instrument's MIDI input
+    // Sends patches to a bank (0 = A ... 7 = H) over the instrument's MIDI input
     // as a librarian would, each into its own slot, and saves them. Runs on the
     // emulator thread, unpaced and muted (about 3 x real time; a full bank takes
     // about a minute and a half). Returns false if the emulator is not running or
@@ -100,18 +100,19 @@ public:
 
     // The instrument's patches, from the firmware's bank cache in RAM (filled from
     // flash at boot and kept up to date by uploads and saves): the names of all
-    // 640 slots (5 banks x 128, empty for a blank slot), and the current program
+    // 1024 slots (8 banks A-H x 128, empty for a blank slot; firmware 2.x fills
+    // blank slots of banks F-H with "Init"), and the current program
     // with its name as the instrument shows it. Captured every 100 ms of emulated
     // time; readPatches() copies and returns true if anything changed since
     // `generation`, which it updates.
     struct Patches {
-        static constexpr int kBanks = 5, kSlots = 128;
+        static constexpr int kBanks = 8, kSlots = 128;
         std::array<std::string, kBanks * kSlots> names;
         int current = -1;  // bank * 128 + slot, or -1 while no patch is loaded
         std::string currentName;
     };
     bool readPatches(Patches& out, std::uint64_t& generation) const;
-    // Selects a stored patch (bank 0 = A ... 4 = E, slot 0-127) over the MIDI input
+    // Selects a stored patch (bank 0 = A ... 7 = H, slot 0-127) over the MIDI input
     // like a host would: bank select LSB, then a program change (channel 1). The
     // instrument must have program change reception on (the plugin's default).
     void selectPatch(int bank, int slot);
@@ -140,6 +141,9 @@ private:
     void advanceBoot();
     void capturePanel();
     void capturePatches();
+    // At boot, as firmware 2.x does for blank slots of banks F-H: blank slots of
+    // banks A-E get the firmware's Init patch in its bank cache (RAM only).
+    void fillBlankSlots();
 
     std::unique_ptr<FirmwarePack> firmware_;
     std::unique_ptr<Machine> machine_;

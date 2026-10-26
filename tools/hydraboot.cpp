@@ -9,7 +9,7 @@
 // (default 0), to bank A over MIDI SysEx after booting, one line per patch;
 // --bank-slot s stores them all in slot s instead of their own slots (an upload
 // to the current program, A001 after boot, also makes it the current sound);
-// --bank-to b sends them to bank b (0 = A ... 4 = E) instead of A. --program sends a
+// --bank-to b sends them to bank b (0 = A ... 7 = H) instead of A. --program sends a
 // bank select (CC 32 = b, the LSB; the firmware ignores CC 0) and program change n afterwards.
 //
 // --setting sets a system setting of the blank flash (e.g. 5.7=1: PgmChgRX on).

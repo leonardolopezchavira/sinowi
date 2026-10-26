@@ -64,7 +64,7 @@ public:
     void setScreenTint(int tint);
     juce::AudioParameterFloat& outputGain() { return *outputGain_; }
     // Sends the patches of a .hydra bank (or a single .patch) to a bank (0 = A
-    // ... 4 = E) of the instrument over its MIDI input. Returns an error message,
+    // ... 7 = H) of the instrument over its MIDI input. Returns an error message,
     // or an empty string once the upload is under way (see statusText()).
     juce::String loadBank(const juce::File& file, int bank);
     // The instrument's patches and the current one (see Emulator::readPatches),
