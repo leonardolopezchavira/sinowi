@@ -1,3 +1,5 @@
+<p align="center"><img src="resources/icon.png" alt="Sinowi icon" width="200"></p>
+
 # Sinowi
 
 Sinowi is a plugin (VST3, AU, standalone) that emulates ASM's Hydrasynth Desktop,
